@@ -3,18 +3,22 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-const BATCH_SIZE: usize = 3;
+const BATCH_SIZE: usize = 10;
 const RECORD_FILE: &str = "photo-tags.json";
+const TAGS: &[&str] = &[
+    "安全訓練", "朝礼", "社外安全パトロール", "積載量確認",
+    "交通保安施設配置確認", "使用機械", "重機始業前点検",
+];
 
 fn batch_prompt(filenames: &[&str]) -> String {
     let list = filenames.join(", ");
+    let tags = TAGS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(" ");
     format!(
         r#"以下の工事現場写真をそれぞれ分類せよ。Output ONLY JSON array: [{{"file":"filename","tag":"?","confidence":0}}, ...]
 ファイル: {list}
 tag候補(必ずこの中から選べ):
-"安全訓練" "朝礼" "社外安全パトロール" "積載量確認" "交通保安施設配置確認" "使用機械" "重機始業前点検"
+{tags}
 confidence: 0.0~1.0"#
     )
 }
@@ -34,7 +38,7 @@ struct BatchItem {
     confidence: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TagRecord {
     tag: String,
     confidence: f64,
@@ -85,67 +89,77 @@ fn extract_json_array(s: &str) -> Option<&str> {
     Some(&s[start..end])
 }
 
-/// Call Gemini CLI via PowerShell, avoiding pipe deadlock by:
-/// - Piping stdout only (reading in a thread)
-/// - Redirecting stderr to NUL in the PS script
-fn call_gemini_cli(images: &[PathBuf], prompt: &str) -> Result<String, String> {
-    let tmp = std::env::temp_dir().join(format!(".photo-tagger-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&tmp);
-
-    // Copy images to temp with neutral names
-    let mut file_refs = Vec::new();
-    for (i, img) in images.iter().enumerate() {
-        let ext = img.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
-        let neutral = format!("image_{}.{}", i, ext);
-        let dest = tmp.join(&neutral);
-        if let Err(e) = std::fs::copy(img, &dest) {
-            let _ = std::fs::remove_dir_all(&tmp);
-            return Err(format!("copy failed: {e}"));
-        }
-        file_refs.push(format!("@{}", neutral));
+fn mime_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("heic") => "image/heic",
+        _ => "image/jpeg",
     }
+}
 
-    let refs_str = file_refs.join(" ");
-    let json_suffix = " Respond with ONLY the JSON array.";
+fn call_gemini_api(images: &[PathBuf], prompt: &str) -> Result<String, String> {
+    let api_key = std::env::var("GEMINI_API_KEY")
+        .map_err(|_| "GEMINI_API_KEY environment variable not set".to_string())?;
 
-    // Write prompt to file
-    let prompt_file = tmp.join("prompt.txt");
-    std::fs::write(&prompt_file, prompt).map_err(|e| format!("write prompt: {e}"))?;
-
-    // Build PowerShell script - redirect all output to files (no pipes = no deadlock)
-    let gemini_cmd = r"C:\Users\yuuji\AppData\Roaming\npm\gemini.cmd";
-    let ps_script = format!(
-        r#"$OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
-$prompt = Get-Content -Raw -Encoding UTF8 'prompt.txt'
-("{refs} " + $prompt + "{suffix}") | & '{gemini}' -m gemini-3-flash-preview --yolo -o text 2>$null > output.txt
-"#,
-        refs = refs_str,
-        suffix = json_suffix,
-        gemini = gemini_cmd,
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
     );
 
-    let script_file = tmp.join("run.ps1");
-    std::fs::write(&script_file, &ps_script).map_err(|e| format!("write script: {e}"))?;
-
-    // Run PowerShell: no pipes at all - output goes to file
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(&script_file)
-        .current_dir(&tmp)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-
-    let output_file = tmp.join("output.txt");
-    let stdout = std::fs::read_to_string(&output_file).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    if stdout.trim().is_empty() {
-        Err(format!("empty output (exit: {})", status))
-    } else {
-        Ok(stdout)
+    let mut parts = Vec::new();
+    for img in images {
+        let bytes = std::fs::read(img).map_err(|e| format!("read {}: {e}", img.display()))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        parts.push(serde_json::json!({
+            "inline_data": {
+                "mime_type": mime_type(img),
+                "data": b64,
+            }
+        }));
     }
+    parts.push(serde_json::json!({"text": prompt}));
+
+    let body = serde_json::json!({
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        }
+    });
+
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            eprintln!("  Retry {attempt}/2 after error: {last_err}");
+            std::thread::sleep(std::time::Duration::from_secs(2u64 << attempt));
+        }
+
+        let resp = match ureq::post(&url).send_json(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("API request failed: {e}");
+                continue;
+            }
+        };
+
+        let json: serde_json::Value = match resp.into_json() {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = format!("parse response: {e}");
+                continue;
+            }
+        };
+
+        match json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+            Some(text) => return Ok(text.to_string()),
+            None => {
+                last_err = format!("unexpected response structure: {json}");
+                continue;
+            }
+        }
+    }
+
+    Err(last_err)
 }
 
 fn classify_batch(images: &[&PathBuf]) -> Vec<(String, TagRecord)> {
@@ -157,7 +171,7 @@ fn classify_batch(images: &[&PathBuf]) -> Vec<(String, TagRecord)> {
     let prompt = batch_prompt(&names);
     let paths: Vec<PathBuf> = images.iter().map(|p| p.to_path_buf()).collect();
 
-    let raw = match call_gemini_cli(&paths, &prompt) {
+    let raw = match call_gemini_api(&paths, &prompt) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("  Batch error: {e}");
@@ -228,11 +242,11 @@ fn main() {
         BATCH_SIZE
     );
 
-    let mut new_results: Vec<(PathBuf, TagRecord)> = Vec::new();
+    let mut moved = 0usize;
 
     for (i, batch) in batches.iter().enumerate() {
         if i > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
         let batch_refs: Vec<&PathBuf> = batch.iter().collect();
         println!("--- Batch {}/{} ({} images) ---", i + 1, num_batches, batch.len());
@@ -240,10 +254,18 @@ fn main() {
 
         for (fname, rec) in &results {
             println!("  {} -> {} ({:.0}%)", fname, rec.tag, rec.confidence * 100.0);
-            if let Some(full) = batch.iter().find(|p| {
-                p.file_name().unwrap().to_str().unwrap() == fname
-            }) {
-                new_results.push((full.clone(), rec.clone()));
+            if !cli.dry_run {
+                if let Some(full) = batch.iter().find(|p| {
+                    p.file_name().unwrap().to_str().unwrap() == fname
+                }) {
+                    let parent = full.parent().unwrap();
+                    let tag_dir = parent.join(&rec.tag);
+                    let _ = std::fs::create_dir_all(&tag_dir);
+                    let dest = tag_dir.join(full.file_name().unwrap());
+                    if std::fs::rename(full, &dest).is_ok() {
+                        moved += 1;
+                    }
+                }
             }
             records.insert(fname.clone(), rec.clone());
         }
@@ -260,28 +282,14 @@ fn main() {
 
     if cli.dry_run {
         println!("\n(dry-run: no files moved)");
-        return;
+    } else {
+        println!("\n{moved} file(s) moved.");
     }
-
-    let mut moved = 0;
-    for (img, rec) in &new_results {
-        let parent = img.parent().unwrap();
-        let tag_dir = parent.join(&rec.tag);
-        let _ = std::fs::create_dir_all(&tag_dir);
-        let dest = tag_dir.join(img.file_name().unwrap());
-        if std::fs::rename(img, &dest).is_ok() {
-            moved += 1;
-        }
-    }
-    println!("\n{moved} file(s) moved.");
 }
 
 fn print_summary(records: &Records) {
     println!("\n--- Summary ({} classified) ---", records.len());
-    for label in &[
-        "安全訓練", "朝礼", "社外安全パトロール", "積載量確認",
-        "交通保安施設配置確認", "使用機械", "重機始業前点検",
-    ] {
+    for label in TAGS {
         let count = records.values().filter(|r| r.tag == *label).count();
         if count > 0 {
             println!("  {label}: {count}");
@@ -289,8 +297,3 @@ fn print_summary(records: &Records) {
     }
 }
 
-impl Clone for TagRecord {
-    fn clone(&self) -> Self {
-        Self { tag: self.tag.clone(), confidence: self.confidence }
-    }
-}
