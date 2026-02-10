@@ -1,27 +1,17 @@
-use base64::Engine;
+mod domain;
+mod fs_ops;
+
+use anyhow::Result;
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use std::thread;
+
+use domain::{Records, TAGS};
 
 const BATCH_SIZE: usize = 10;
-const RECORD_FILE: &str = "photo-tags.json";
-const TAGS: &[&str] = &[
-    "安全訓練", "朝礼", "社外安全パトロール", "積載量確認",
-    "交通保安施設配置確認", "使用機械", "重機始業前点検",
-];
-
-fn batch_prompt(filenames: &[&str]) -> String {
-    let list = filenames.join(", ");
-    let tags = TAGS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(" ");
-    format!(
-        r#"以下の工事現場写真をそれぞれ分類せよ。Output ONLY JSON array: [{{"file":"filename","tag":"?","confidence":0}}, ...]
-ファイル: {list}
-tag候補(必ずこの中から選べ):
-{tags}
-confidence: 0.0~1.0"#
-    )
-}
+const MAX_CONCURRENT: usize = 3;
 
 #[derive(Parser)]
 #[command(name = "photo-tagger", version, about = "Classify construction photos")]
@@ -29,261 +19,16 @@ struct Cli {
     path: PathBuf,
     #[arg(long)]
     dry_run: bool,
+    #[arg(long)]
+    profile: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct BatchItem {
-    file: String,
-    tag: String,
-    confidence: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TagRecord {
-    tag: String,
-    confidence: f64,
-}
-
-type Records = HashMap<String, TagRecord>;
-
-fn load_records(base: &Path) -> Records {
-    let path = base.join(RECORD_FILE);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_records(base: &Path, records: &Records) {
-    let path = base.join(RECORD_FILE);
-    if let Ok(json) = serde_json::to_string_pretty(records) {
-        let _ = std::fs::write(&path, json);
-    }
-}
-
-fn is_image(p: &Path) -> bool {
-    matches!(
-        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
-        Some("jpg" | "jpeg" | "png" | "heic")
-    )
-}
-
-fn collect_images(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            out.extend(collect_images(&p));
-        } else if is_image(&p) {
-            out.push(p);
-        }
-    }
-    out.sort();
-    out
-}
-
-fn extract_json_array(s: &str) -> Option<&str> {
-    let start = s.find('[')?;
-    let end = s.rfind(']')? + 1;
-    Some(&s[start..end])
-}
-
-fn mime_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("png") => "image/png",
-        Some("heic") => "image/heic",
-        _ => "image/jpeg",
-    }
-}
-
-fn call_gemini_api(images: &[PathBuf], prompt: &str) -> Result<String, String> {
-    let api_key = std::env::var("GEMINI_API_KEY")
-        .map_err(|_| "GEMINI_API_KEY environment variable not set".to_string())?;
-
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
-        api_key
-    );
-
-    let mut parts = Vec::new();
-    for img in images {
-        let bytes = std::fs::read(img).map_err(|e| format!("read {}: {e}", img.display()))?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        parts.push(serde_json::json!({
-            "inline_data": {
-                "mime_type": mime_type(img),
-                "data": b64,
-            }
-        }));
-    }
-    parts.push(serde_json::json!({"text": prompt}));
-
-    let body = serde_json::json!({
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "responseMimeType": "application/json"
-        }
-    });
-
-    let mut last_err = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            eprintln!("  Retry {attempt}/2 after error: {last_err}");
-            std::thread::sleep(std::time::Duration::from_secs(2u64 << attempt));
-        }
-
-        let resp = match ureq::post(&url).send_json(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = format!("API request failed: {e}");
-                continue;
-            }
-        };
-
-        let json: serde_json::Value = match resp.into_json() {
-            Ok(v) => v,
-            Err(e) => {
-                last_err = format!("parse response: {e}");
-                continue;
-            }
-        };
-
-        match json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
-            Some(text) => return Ok(text.to_string()),
-            None => {
-                last_err = format!("unexpected response structure: {json}");
-                continue;
-            }
-        }
-    }
-
-    Err(last_err)
-}
-
-fn classify_batch(images: &[&PathBuf]) -> Vec<(String, TagRecord)> {
-    let names: Vec<&str> = images
-        .iter()
-        .map(|p| p.file_name().unwrap().to_str().unwrap())
-        .collect();
-
-    let prompt = batch_prompt(&names);
-    let paths: Vec<PathBuf> = images.iter().map(|p| p.to_path_buf()).collect();
-
-    let raw = match call_gemini_api(&paths, &prompt) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  Batch error: {e}");
-            return Vec::new();
-        }
-    };
-
-    let json_str = match extract_json_array(&raw) {
-        Some(s) => s,
-        None => {
-            eprintln!("  No JSON array in: {raw}");
-            return Vec::new();
-        }
-    };
-
-    let items: Vec<BatchItem> = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("  Parse error: {e}");
-            return Vec::new();
-        }
-    };
-
-    items
-        .into_iter()
-        .map(|b| (b.file, TagRecord { tag: b.tag, confidence: b.confidence }))
-        .collect()
-}
-
-fn main() {
-    let cli = Cli::parse();
-    let mut records = load_records(&cli.path);
-
-    let images = collect_images(&cli.path);
-    if images.is_empty() {
-        println!("No images found in {}", cli.path.display());
-        return;
-    }
-
-    let pending: Vec<_> = images
-        .iter()
-        .filter(|img| {
-            let name = img.file_name().unwrap().to_string_lossy();
-            !records.contains_key(name.as_ref())
-        })
-        .cloned()
-        .collect();
-
-    let skip = images.len() - pending.len();
-    if skip > 0 {
-        println!("Skipping {skip} already classified.");
-    }
-    if pending.is_empty() {
-        println!("All {} images classified.", images.len());
-        print_summary(&records);
-        return;
-    }
-
-    let batches: Vec<Vec<PathBuf>> = pending
-        .chunks(BATCH_SIZE)
-        .map(|c| c.to_vec())
-        .collect();
-    let num_batches = batches.len();
-    println!(
-        "{} image(s) in {} batch(es) ({}枚/batch)\n",
-        pending.len(),
-        num_batches,
-        BATCH_SIZE
-    );
-
-    let mut moved = 0usize;
-
-    for (i, batch) in batches.iter().enumerate() {
-        if i > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        let batch_refs: Vec<&PathBuf> = batch.iter().collect();
-        println!("--- Batch {}/{} ({} images) ---", i + 1, num_batches, batch.len());
-        let results = classify_batch(&batch_refs);
-
-        for (fname, rec) in &results {
-            println!("  {} -> {} ({:.0}%)", fname, rec.tag, rec.confidence * 100.0);
-            if !cli.dry_run {
-                if let Some(full) = batch.iter().find(|p| {
-                    p.file_name().unwrap().to_str().unwrap() == fname
-                }) {
-                    let parent = full.parent().unwrap();
-                    let tag_dir = parent.join(&rec.tag);
-                    let _ = std::fs::create_dir_all(&tag_dir);
-                    let dest = tag_dir.join(full.file_name().unwrap());
-                    if std::fs::rename(full, &dest).is_ok() {
-                        moved += 1;
-                    }
-                }
-            }
-            records.insert(fname.clone(), rec.clone());
-        }
-        save_records(&cli.path, &records);
-
-        let classified: usize = results.len();
-        let failed = batch.len() - classified;
-        if failed > 0 {
-            println!("  {failed} unmatched - re-run to retry.");
-        }
-    }
-
-    print_summary(&records);
-
-    if cli.dry_run {
-        println!("\n(dry-run: no files moved)");
+fn fmt_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
     } else {
-        println!("\n{moved} file(s) moved.");
+        format!("{:.1}s", d.as_secs_f64())
     }
 }
 
@@ -297,3 +42,189 @@ fn print_summary(records: &Records) {
     }
 }
 
+fn main() -> Result<()> {
+    let total_start = Instant::now();
+    let cli = Cli::parse();
+    let profile = cli.profile;
+
+    let records = Mutex::new(fs_ops::load_records(&cli.path));
+
+    // -- collect phase --
+    let t = Instant::now();
+    let images = fs_ops::collect_images(&cli.path);
+    let collect_dur = t.elapsed();
+
+    if images.is_empty() {
+        println!("No images found in {}", cli.path.display());
+        return Ok(());
+    }
+
+    // -- filter phase --
+    let t = Instant::now();
+    let pending: Vec<_> = {
+        let recs = records.lock().expect("mutex poisoned");
+        images
+            .iter()
+            .filter(|img| {
+                let name = img
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default();
+                !recs.contains_key(name.as_ref())
+            })
+            .cloned()
+            .collect()
+    };
+    let filter_dur = t.elapsed();
+
+    let skip = images.len() - pending.len();
+    if skip > 0 {
+        println!("Skipping {skip} already classified.");
+    }
+    if pending.is_empty() {
+        println!("All {} images classified.", images.len());
+        print_summary(&records.lock().expect("mutex poisoned"));
+        return Ok(());
+    }
+
+    let batches: Vec<Vec<PathBuf>> = pending.chunks(BATCH_SIZE).map(|c| c.to_vec()).collect();
+    let num_batches = batches.len();
+    println!(
+        "{} image(s) in {} batch(es) ({}枚/batch, {}並列)\n",
+        pending.len(),
+        num_batches,
+        BATCH_SIZE,
+        MAX_CONCURRENT
+    );
+
+    let moved = Mutex::new(0usize);
+    let base_path = cli.path.clone();
+    let dry_run = cli.dry_run;
+
+    // -- classify phase --
+    let classify_start = Instant::now();
+    let mut batch_durations: Vec<(usize, Duration)> = Vec::new();
+    let mut move_dur = Duration::ZERO;
+
+    for (chunk_idx, chunk) in batches.chunks(MAX_CONCURRENT).enumerate() {
+        let handles: Vec<_> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, batch)| {
+                let batch_num = chunk_idx * MAX_CONCURRENT + i + 1;
+                let batch = batch.clone();
+                thread::spawn(move || {
+                    eprintln!(
+                        "--- Batch {batch_num}/{num_batches} ({} images) ---",
+                        batch.len()
+                    );
+                    let start = Instant::now();
+                    let results = match domain::classify_batch(&batch) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("  Batch {batch_num} error: {e}");
+                            Vec::new()
+                        }
+                    };
+                    let elapsed = start.elapsed();
+                    (batch_num, batch, results, elapsed)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let (batch_num, batch, results, elapsed) =
+                handle.join().expect("batch thread panicked");
+            batch_durations.push((batch_num, elapsed));
+
+            for (fname, rec) in &results {
+                println!(
+                    "  [B{batch_num}] {} -> {} ({:.0}%)",
+                    fname,
+                    rec.tag,
+                    rec.confidence * 100.0
+                );
+
+                // -- move phase (per file) --
+                if !dry_run {
+                    let move_t = Instant::now();
+                    if let Some(full) = batch.iter().find(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map_or(false, |n| n == fname)
+                    }) {
+                        if let Some(parent) = full.parent() {
+                            let tag_dir = parent.join(&rec.tag);
+                            let _ = std::fs::create_dir_all(&tag_dir);
+                            if let Some(name) = full.file_name() {
+                                let dest = tag_dir.join(name);
+                                if std::fs::rename(full, &dest).is_ok() {
+                                    *moved.lock().expect("mutex poisoned") += 1;
+                                }
+                            }
+                        }
+                    }
+                    move_dur += move_t.elapsed();
+                }
+                records
+                    .lock()
+                    .expect("mutex poisoned")
+                    .insert(fname.clone(), rec.clone());
+            }
+
+            if let Err(e) =
+                fs_ops::save_records(&base_path, &records.lock().expect("mutex poisoned"))
+            {
+                eprintln!("  Warning: failed to save records: {e}");
+            }
+
+            let classified = results.len();
+            let failed = batch.len() - classified;
+            if failed > 0 {
+                println!("  [B{batch_num}] {failed} unmatched - re-run to retry.");
+            }
+        }
+    }
+    let classify_dur = classify_start.elapsed();
+
+    print_summary(&records.lock().expect("mutex poisoned"));
+
+    if dry_run {
+        println!("\n(dry-run: no files moved)");
+    } else {
+        println!("\n{} file(s) moved.", moved.lock().expect("mutex poisoned"));
+    }
+
+    // -- Timing output --
+    let total_dur = total_start.elapsed();
+
+    if profile {
+        let batch_detail = batch_durations
+            .iter()
+            .map(|(num, dur)| format!("B{num}: {}", fmt_duration(*dur)))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        println!("\n--- Profile ---");
+        println!("  {:<12} {:>8}", "collect:", fmt_duration(collect_dur));
+        println!("  {:<12} {:>8}", "filter:", fmt_duration(filter_dur));
+        if batch_detail.is_empty() {
+            println!("  {:<12} {:>8}", "classify:", fmt_duration(classify_dur));
+        } else {
+            println!(
+                "  {:<12} {:>8} ({})",
+                "classify:",
+                fmt_duration(classify_dur),
+                batch_detail
+            );
+        }
+        if !dry_run {
+            println!("  {:<12} {:>8}", "move:", fmt_duration(move_dur));
+        }
+        println!("  {:<12} {:>8}", "total:", fmt_duration(total_dur));
+    } else {
+        println!("\nCompleted in {}.", fmt_duration(total_dur));
+    }
+
+    Ok(())
+}
