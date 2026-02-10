@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::thread;
 
-use domain::{Records, TAGS};
+use domain::Records;
 
 const BATCH_SIZE: usize = 10;
 const MAX_CONCURRENT: usize = 3;
@@ -32,9 +32,9 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
-fn print_summary(records: &Records) {
+fn print_summary(records: &Records, categories: &[String]) {
     println!("\n--- Summary ({} classified) ---", records.len());
-    for label in TAGS {
+    for label in categories {
         let count = records.values().filter(|r| r.tag == *label).count();
         if count > 0 {
             println!("  {label}: {count}");
@@ -49,9 +49,17 @@ fn main() -> Result<()> {
 
     let records = Mutex::new(fs_ops::load_records(&cli.path));
 
+    // -- discover categories from subdirectories --
+    let categories = fs_ops::collect_subdirs(&cli.path);
+    if categories.is_empty() {
+        eprintln!("Error: no subdirectories found in {}. Create category directories first.", cli.path.display());
+        return Ok(());
+    }
+    println!("Categories: {}", categories.join(", "));
+
     // -- collect phase --
     let t = Instant::now();
-    let images = fs_ops::collect_images(&cli.path);
+    let images = fs_ops::collect_images_flat(&cli.path);
     let collect_dur = t.elapsed();
 
     if images.is_empty() {
@@ -83,7 +91,7 @@ fn main() -> Result<()> {
     }
     if pending.is_empty() {
         println!("All {} images classified.", images.len());
-        print_summary(&records.lock().expect("mutex poisoned"));
+        print_summary(&records.lock().expect("mutex poisoned"), &categories);
         return Ok(());
     }
 
@@ -113,13 +121,14 @@ fn main() -> Result<()> {
             .map(|(i, batch)| {
                 let batch_num = chunk_idx * MAX_CONCURRENT + i + 1;
                 let batch = batch.clone();
+                let cats = categories.clone();
                 thread::spawn(move || {
                     eprintln!(
                         "--- Batch {batch_num}/{num_batches} ({} images) ---",
                         batch.len()
                     );
                     let start = Instant::now();
-                    let results = match domain::classify_batch(&batch) {
+                    let results = match domain::classify_batch(&batch, &cats) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("  Batch {batch_num} error: {e}");
@@ -153,15 +162,10 @@ fn main() -> Result<()> {
                             .and_then(|n| n.to_str())
                             .map_or(false, |n| n == fname)
                     }) {
-                        if let Some(parent) = full.parent() {
-                            let tag_dir = parent.join(&rec.tag);
-                            let _ = std::fs::create_dir_all(&tag_dir);
-                            if let Some(name) = full.file_name() {
-                                let dest = tag_dir.join(name);
-                                if std::fs::rename(full, &dest).is_ok() {
-                                    *moved.lock().expect("mutex poisoned") += 1;
-                                }
-                            }
+                        if let Err(e) = fs_ops::move_to_tag_dir(full, &rec.tag) {
+                            eprintln!("  Warning: {e}");
+                        } else {
+                            *moved.lock().expect("mutex poisoned") += 1;
                         }
                     }
                     move_dur += move_t.elapsed();
@@ -187,7 +191,7 @@ fn main() -> Result<()> {
     }
     let classify_dur = classify_start.elapsed();
 
-    print_summary(&records.lock().expect("mutex poisoned"));
+    print_summary(&records.lock().expect("mutex poisoned"), &categories);
 
     if dry_run {
         println!("\n(dry-run: no files moved)");
