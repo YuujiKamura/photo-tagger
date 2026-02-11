@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::domain::Records;
+use crate::domain::{GroupRecords, Records};
 
 const RECORD_FILE: &str = "photo-tags.json";
+const GROUP_FILE: &str = "photo-groups.json";
 
 pub fn is_image(p: &Path) -> bool {
     matches!(
@@ -27,6 +28,23 @@ pub fn save_records(base: &Path, records: &Records) -> Result<()> {
     let path = base.join(RECORD_FILE);
     let json = serde_json::to_string_pretty(records).context("Failed to serialize records")?;
     std::fs::write(&path, json).with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+pub fn load_group_records(base: &Path) -> GroupRecords {
+    let path = base.join(GROUP_FILE);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_group_records(base: &Path, records: &GroupRecords) -> Result<()> {
+    let path = base.join(GROUP_FILE);
+    let json =
+        serde_json::to_string_pretty(records).context("Failed to serialize group records")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
 }
 

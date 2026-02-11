@@ -38,6 +38,65 @@ pub fn extract_json_array(s: &str) -> Option<&str> {
     Some(&s[start..end])
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GroupItem {
+    pub file: String,
+    pub role: String,
+    pub machine_type: String,
+    pub machine_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupRecord {
+    pub role: String,
+    pub machine_type: String,
+    pub machine_id: String,
+    pub group: u32,
+}
+
+pub type GroupRecords = HashMap<String, GroupRecord>;
+
+pub fn group_prompt(filenames: &[&str]) -> String {
+    let list = filenames.join(", ");
+    format!(
+        r#"工事現場の使用機械写真を分類せよ。各機械につき3枚1組: 機械全景/特定自主検査証票(またはナンバープレート)/排ガス対策型・低騒音型機械証票。Output ONLY JSON array: [{{"file":"filename","role":"?","machine_type":"?","machine_id":"?"}}, ...]
+ファイル: {list}
+role: "機械全景" or "特定自主検査証票" or "排ガス対策型・低騒音型機械証票" or "ナンバープレート"
+machine_type: 機械の種類(例: タイヤローラー, アスファルトフィニッシャー, バックホウ)
+machine_id: 型式番号(例: TZ-703, HA60C-2)。証票や銘板から読み取れ。同一機械の3枚は同じmachine_idにせよ。"#
+    )
+}
+
+pub fn classify_group_batch(images: &[PathBuf]) -> Result<Vec<(String, GroupItem)>> {
+    let names: Vec<&str> = images
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+        })
+        .collect();
+
+    let prompt = group_prompt(&names);
+    let options = AnalyzeOptions::default().json();
+
+    let raw = analyze(&prompt, images, options).context("AI analyze failed")?;
+
+    let json_str = extract_json_array(&raw)
+        .with_context(|| format!("No JSON array in: {raw}"))?;
+
+    let items: Vec<GroupItem> =
+        serde_json::from_str(json_str).context("Failed to parse group JSON")?;
+
+    Ok(items
+        .into_iter()
+        .map(|g| {
+            let file = g.file.clone();
+            (file, g)
+        })
+        .collect())
+}
+
 pub fn classify_batch(images: &[PathBuf], categories: &[String]) -> Result<Vec<(String, TagRecord)>> {
     let names: Vec<&str> = images
         .iter()
