@@ -118,6 +118,55 @@ fn select_focus_text(board_text: &str, other_text: &str, notes: &str) -> String 
     format!("{}\n{}\n{}", board_text, other_text, notes)
 }
 
+fn activity_name_from_fields(
+    fields: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let meta: std::collections::HashSet<&'static str> =
+        ["工事名", "工種", "測点", "年月日", "撮影", "写真"].into_iter().collect();
+    let mut keys: Vec<&String> = fields
+        .keys()
+        .filter(|k| !k.trim().is_empty())
+        .filter(|k| !meta.contains(k.as_str()))
+        .filter(|k| !k.ends_with('員'))
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    keys.retain(|k| {
+        let val = fields.get(*k).map(|v| v.as_str()).unwrap_or("");
+        !val.chars().any(|c| c.is_ascii_digit())
+    });
+    if keys.is_empty() {
+        return None;
+    }
+    keys.sort();
+
+    if keys.len() >= 2 {
+        return Some(format!("{}_{}", keys[0], keys[1]));
+    }
+
+    let key = keys[0];
+    let val = fields.get(key).map(|v| v.trim()).unwrap_or("");
+    if !val.is_empty() {
+        Some(format!("{}_{}", key, val))
+    } else {
+        Some(key.clone())
+    }
+}
+
+fn focus_from_fields_or_text(row: &ActivityCsvRow) -> String {
+    if !row.board_fields.trim().is_empty() && row.board_fields.trim() != "{}" {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(
+            &row.board_fields,
+        ) {
+            if let Some(name) = activity_name_from_fields(&map) {
+                return name;
+            }
+        }
+    }
+    select_focus_text(&row.board_text, &row.other_text, &row.notes)
+}
+
 fn assign_groups(records: &mut GroupRecords) {
     let mut id_to_group: HashMap<String, u32> = HashMap::new();
     let mut next_group = 1u32;
@@ -376,7 +425,7 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
         cli.concurrent
     ));
 
-    let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"other_text":null,"notes":null}"#;
+    let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"board_lines":null,"board_fields":null,"other_text":null,"notes":null}"#;
 
     let classify_start = Instant::now();
     let mut pending_chunks: Vec<Vec<PathBuf>> = pending
@@ -455,7 +504,13 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
 struct ActivityCsvRow {
     file: String,
     board_text: String,
+    #[serde(default)]
+    board_lines: String,
+    #[serde(default)]
+    board_fields: String,
+    #[serde(default)]
     other_text: String,
+    #[serde(default)]
     notes: String,
 }
 
@@ -480,7 +535,7 @@ fn run_activity_folders(cli: &Cli) -> Result<()> {
     let mut moves: Vec<(String, String)> = Vec::new();
 
     for (ts, row) in rows {
-        let combined = format!("{}\n{}\n{}", row.board_text, row.other_text, row.notes);
+        let combined = focus_from_fields_or_text(&row);
         let activity = if let Some(act) = classify_activity(&combined) {
             act.to_string()
         } else {
@@ -535,20 +590,11 @@ fn run_activity_folders_auto(cli: &Cli) -> Result<()> {
     let mut moves: Vec<(String, String)> = Vec::new();
 
     for (ts, row) in rows {
-        let focus = select_focus_text(&row.board_text, &row.other_text, &row.notes);
-        let activity = if focus.trim().is_empty() {
-            let frame = ActivityFrame { activity: String::new(), ts };
-            infer_activity_with_gap(prev.as_ref(), &frame, cli.gap_min)
-        } else {
-            let keywords = extract_top_keywords(&focus, 2);
-            make_activity_name(&keywords)
-        };
-
-        let frame = ActivityFrame {
+        let activity = auto_activity_name_from_row(&row, prev.as_ref(), cli.gap_min, ts);
+        prev = Some(ActivityFrame {
             activity: activity.clone(),
             ts,
-        };
-        prev = Some(frame);
+        });
 
         let src = base.join(&row.file);
         let dst_dir = base.join(&activity);
@@ -568,6 +614,45 @@ fn run_activity_folders_auto(cli: &Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn auto_activity_name_from_row(
+    row: &ActivityCsvRow,
+    prev: Option<&ActivityFrame>,
+    gap_min: i64,
+    ts: i64,
+) -> String {
+    if !row.board_fields.trim().is_empty() && row.board_fields.trim() != "{}" {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(
+            &row.board_fields,
+        ) {
+            if let Some(name) = activity_name_from_fields(&map) {
+                return name;
+            }
+        }
+    }
+
+    let text_for_keywords = if !row.board_lines.trim().is_empty() {
+        format!(
+            "{} {} {} {}",
+            row.other_text,
+            row.board_lines.replace(" / ", " "),
+            row.board_text,
+            row.notes
+        )
+    } else if !row.board_text.trim().is_empty() || !row.other_text.trim().is_empty() {
+        format!("{} {}", row.other_text, row.board_text)
+    } else {
+        row.notes.clone()
+    };
+
+    if text_for_keywords.trim().is_empty() {
+        let frame = ActivityFrame { activity: String::new(), ts };
+        return infer_activity_with_gap(prev, &frame, gap_min);
+    }
+
+    let keywords = extract_top_keywords(&text_for_keywords, 2);
+    make_activity_name(&keywords)
 }
 
 #[cfg(test)]
@@ -591,5 +676,73 @@ mod tests {
         let bt = "工事名 市道\n交通保安施設 設置状況\n";
         let text = select_focus_text(bt, "", "");
         assert_eq!(text, "交通保安施設 設置状況");
+    }
+
+    #[test]
+    fn focus_from_fields_uses_known_keys() {
+        let row = ActivityCsvRow {
+            file: "a.jpg".into(),
+            board_text: "".into(),
+            board_lines: "".into(),
+            board_fields: r#"{"処分状況":"社内検査"}"#.into(),
+            other_text: "".into(),
+            notes: "".into(),
+        };
+        let text = focus_from_fields_or_text(&row);
+        assert_eq!(text, "処分状況_社内検査");
+    }
+
+    #[test]
+    fn activity_name_from_fields_two_keys() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("出荷指示".to_string(), "As混合物".to_string());
+        map.insert("外観検査".to_string(), "".to_string());
+        let name = activity_name_from_fields(&map).unwrap();
+        assert_eq!(name, "出荷指示_外観検査");
+    }
+
+    #[test]
+    fn activity_name_from_fields_key_and_value() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("処分状況".to_string(), "社内検査".to_string());
+        let name = activity_name_from_fields(&map).unwrap();
+        assert_eq!(name, "処分状況_社内検査");
+    }
+
+    #[test]
+    fn activity_name_from_fields_skips_numeric_and_person() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("最大積載量".to_string(), "3.750 t".to_string());
+        map.insert("社内検査員".to_string(), "池田 好敬".to_string());
+        let name = activity_name_from_fields(&map);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn auto_activity_uses_board_lines_keywords() {
+        let row = ActivityCsvRow {
+            file: "a.jpg".into(),
+            board_text: "".into(),
+            board_lines: "As混合物出荷指示 / 外観検査".into(),
+            board_fields: "".into(),
+            other_text: "".into(),
+            notes: "".into(),
+        };
+        let name = auto_activity_name_from_row(&row, None, 10, 0);
+        assert_eq!(name, "出荷指示_外観検査");
+    }
+
+    #[test]
+    fn auto_activity_uses_other_text_keywords() {
+        let row = ActivityCsvRow {
+            file: "a.jpg".into(),
+            board_text: "".into(),
+            board_lines: "最大積載量 3.750 t".into(),
+            board_fields: "".into(),
+            other_text: "処分状況 社内検査".into(),
+            notes: "".into(),
+        };
+        let name = auto_activity_name_from_row(&row, None, 10, 0);
+        assert_eq!(name, "処分状況_社内検査");
     }
 }
