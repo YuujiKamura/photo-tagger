@@ -17,6 +17,7 @@ use photo_tagger::{
     classify_activity,
     classify_group_batch,
     infer_activity_with_gap,
+    extract_top_keywords,
     material_prompt,
     materialize_outputs,
     parse_material_json,
@@ -38,6 +39,8 @@ struct Cli {
     material: bool,
     #[arg(long)]
     activity_folders: bool,
+    #[arg(long)]
+    activity_folders_auto: bool,
     #[arg(long)]
     out: Option<PathBuf>,
     #[arg(long)]
@@ -91,6 +94,16 @@ fn parse_photo_timestamp(name: &str) -> Option<i64> {
     let time = NaiveTime::from_hms_opt(hh, mm, ss)?;
     let dt = date.and_time(time);
     Some(Utc.from_utc_datetime(&dt).timestamp())
+}
+
+fn make_activity_name(keywords: &[String]) -> String {
+    if keywords.is_empty() {
+        return "未分類".to_string();
+    }
+    if keywords.len() == 1 {
+        return keywords[0].clone();
+    }
+    format!("{}_{}", keywords[0], keywords[1])
 }
 
 fn assign_groups(records: &mut GroupRecords) {
@@ -151,6 +164,10 @@ fn main() -> Result<()> {
     }
     if cli.activity_folders {
         run_activity_folders(&cli)?;
+        return Ok(());
+    }
+    if cli.activity_folders_auto {
+        run_activity_folders_auto(&cli)?;
         return Ok(());
     }
 
@@ -485,6 +502,62 @@ fn run_activity_folders(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+fn run_activity_folders_auto(cli: &Cli) -> Result<()> {
+    let base = &cli.path;
+    let csv_path = base.join("analysis.csv");
+    if !csv_path.exists() {
+        anyhow::bail!("analysis.csv not found in {}", base.display());
+    }
+
+    let mut rdr = csv::Reader::from_path(&csv_path)?;
+    let mut rows: Vec<(i64, ActivityCsvRow)> = Vec::new();
+    for result in rdr.deserialize() {
+        let row: ActivityCsvRow = result?;
+        if let Some(ts) = parse_photo_timestamp(&row.file) {
+            rows.push((ts, row));
+        }
+    }
+    rows.sort_by_key(|(ts, _)| *ts);
+
+    let mut prev: Option<ActivityFrame> = None;
+    let mut moves: Vec<(String, String)> = Vec::new();
+
+    for (ts, row) in rows {
+        let combined = format!("{}\n{}\n{}", row.board_text, row.other_text, row.notes);
+        let activity = if combined.trim().is_empty() {
+            let frame = ActivityFrame { activity: String::new(), ts };
+            infer_activity_with_gap(prev.as_ref(), &frame, cli.gap_min)
+        } else {
+            let keywords = extract_top_keywords(&combined, 2);
+            make_activity_name(&keywords)
+        };
+
+        let frame = ActivityFrame {
+            activity: activity.clone(),
+            ts,
+        };
+        prev = Some(frame);
+
+        let src = base.join(&row.file);
+        let dst_dir = base.join(&activity);
+        let dst = dst_dir.join(&row.file);
+        moves.push((src.to_string_lossy().to_string(), dst.to_string_lossy().to_string()));
+
+        if !cli.dry_run {
+            std::fs::create_dir_all(&dst_dir)?;
+            std::fs::rename(&src, &dst)?;
+        }
+    }
+
+    if cli.dry_run {
+        for (src, dst) in moves {
+            safe_println(&format!("MOVE {src} -> {dst}"));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +566,11 @@ mod tests {
     fn parse_timestamp_from_filename() {
         let ts = parse_photo_timestamp("20260211_235409.jpg").unwrap();
         assert!(ts > 0);
+    }
+
+    #[test]
+    fn auto_name_from_keywords() {
+        let name = make_activity_name(&["交通保安施設".into(), "設置状況".into()]);
+        assert_eq!(name, "交通保安施設_設置状況");
     }
 }

@@ -14,6 +14,7 @@ pub use material::{
     materialize_outputs,
     classify_activity,
     infer_activity_with_gap,
+    extract_top_keywords,
 };
 
 use std::collections::HashMap;
