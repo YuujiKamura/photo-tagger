@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialRecord {
@@ -20,6 +23,19 @@ struct MaterialRecordPartial {
     other_text: Option<String>,
     notes: Option<String>,
     error: Option<String>,
+}
+
+impl MaterialRecord {
+    pub fn new(file: &str) -> Self {
+        Self {
+            file: file.to_string(),
+            objects: Vec::new(),
+            board_text: String::new(),
+            other_text: String::new(),
+            notes: String::new(),
+            error: None,
+        }
+    }
 }
 
 pub fn material_prompt(file: &str) -> String {
@@ -48,10 +64,77 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
     })
 }
 
+pub fn append_jsonl(path: &Path, rec: &MaterialRecord) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let line = serde_json::to_string(rec).context("Failed to serialize material record")?;
+    writeln!(file, "{line}").context("Failed to write JSONL line")?;
+    Ok(())
+}
+
+pub fn read_jsonl(path: &Path) -> Result<Vec<MaterialRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut out = Vec::new();
+    for line in data.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: MaterialRecord =
+            serde_json::from_str(line).context("Failed to parse JSONL line")?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
+    let records = read_jsonl(jsonl)?;
+
+    let json_path = out_dir.join("analysis.json");
+    let json = serde_json::to_string_pretty(&records)
+        .context("Failed to serialize analysis.json")?;
+    std::fs::write(&json_path, json)
+        .with_context(|| format!("Failed to write {}", json_path.display()))?;
+
+    let csv_path = out_dir.join("analysis.csv");
+    let mut wtr = csv::Writer::from_path(&csv_path)
+        .with_context(|| format!("Failed to create {}", csv_path.display()))?;
+
+    for rec in records {
+        let row = MaterialCsvRow {
+            file: rec.file,
+            objects: rec.objects.join("; "),
+            board_text: rec.board_text,
+            other_text: rec.other_text,
+            notes: rec.notes,
+            error: rec.error.unwrap_or_default(),
+        };
+        wtr.serialize(row).context("Failed to write CSV row")?;
+    }
+    wtr.flush().context("Failed to flush CSV")?;
+    Ok(())
+}
+
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')? + 1;
     Some(&s[start..end])
+}
+
+#[derive(Serialize)]
+struct MaterialCsvRow {
+    file: String,
+    objects: String,
+    board_text: String,
+    other_text: String,
+    notes: String,
+    error: String,
 }
 
 #[cfg(test)]
@@ -67,5 +150,25 @@ mod tests {
         assert_eq!(rec.board_text, "");
         assert_eq!(rec.other_text, "");
         assert_eq!(rec.notes, "");
+    }
+
+    #[test]
+    fn materialize_outputs_from_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("analysis.jsonl");
+
+        let rec1 = MaterialRecord::new("a.jpg");
+        let rec2 = MaterialRecord {
+            file: "b.jpg".into(),
+            objects: vec!["roller".into()],
+            ..MaterialRecord::new("b.jpg")
+        };
+        append_jsonl(&jsonl, &rec1).unwrap();
+        append_jsonl(&jsonl, &rec2).unwrap();
+
+        materialize_outputs(&jsonl, dir.path()).unwrap();
+
+        assert!(dir.path().join("analysis.json").exists());
+        assert!(dir.path().join("analysis.csv").exists());
     }
 }
