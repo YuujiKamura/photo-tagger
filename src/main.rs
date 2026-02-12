@@ -298,6 +298,8 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
         pending.len()
     );
 
+    let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"other_text":null,"notes":null}"#;
+
     let classify_start = Instant::now();
     for img in pending {
         let fname = img
@@ -306,7 +308,9 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
             .unwrap_or_else(|| "unknown".to_string());
         let prompt = material_prompt(&fname);
 
-        let mut options = AnalyzeOptions::default().json();
+        let mut options = AnalyzeOptions::default()
+            .json()
+            .with_partial_json(partial_json);
         if cli.profile {
             options = options.with_profile_path(&profile_path);
         }

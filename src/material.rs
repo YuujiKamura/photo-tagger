@@ -7,6 +7,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialRecord {
     pub file: String,
+    pub scene_type: String,
     pub objects: Vec<String>,
     pub board_text: String,
     pub other_text: String,
@@ -18,6 +19,7 @@ pub struct MaterialRecord {
 #[derive(Debug, Deserialize)]
 struct MaterialRecordPartial {
     file: Option<String>,
+    scene_type: Option<String>,
     objects: Option<Vec<String>>,
     board_text: Option<String>,
     other_text: Option<String>,
@@ -29,6 +31,7 @@ impl MaterialRecord {
     pub fn new(file: &str) -> Self {
         Self {
             file: file.to_string(),
+            scene_type: String::new(),
             objects: Vec::new(),
             board_text: String::new(),
             other_text: String::new(),
@@ -40,8 +43,9 @@ impl MaterialRecord {
 
 pub fn material_prompt(file: &str) -> String {
     format!(
-        r#"次の画像について、写っている物体と文字情報だけを抽出せよ。推測や分類は不要。Output ONLY JSON object: {{"file":"{file}","objects":["..."],"board_text":"","other_text":"","notes":""}}
+        r#"次の画像について、写っている物体と文字情報だけを抽出せよ。推測や分類は不要。Output ONLY JSON object: {{"file":"{file}","scene_type":"overview|board_with_measure|measure_closeup","objects":["..."],"board_text":"","other_text":"","notes":""}}
 対象ファイル: {file}
+scene_type: 写真タイプは3択のみ (overview / board_with_measure / measure_closeup)
 objects: 写っている物体の短いリスト（例: ローラー, アスファルト, 作業員, 看板）
 board_text: 黒板があればその文字をそのまま
 other_text: 黒板以外の文字（標識、銘板、番号など）
@@ -56,6 +60,7 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
 
     Ok(MaterialRecord {
         file: partial.file.unwrap_or_default(),
+        scene_type: partial.scene_type.unwrap_or_default(),
         objects: partial.objects.unwrap_or_default(),
         board_text: partial.board_text.unwrap_or_default(),
         other_text: partial.other_text.unwrap_or_default(),
@@ -109,6 +114,7 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
     for rec in records {
         let row = MaterialCsvRow {
             file: rec.file,
+            scene_type: rec.scene_type,
             objects: rec.objects.join("; "),
             board_text: rec.board_text,
             other_text: rec.other_text,
@@ -130,6 +136,7 @@ fn extract_json_object(s: &str) -> Option<&str> {
 #[derive(Serialize)]
 struct MaterialCsvRow {
     file: String,
+    scene_type: String,
     objects: String,
     board_text: String,
     other_text: String,
@@ -146,6 +153,7 @@ mod tests {
         let input = r#"{"file":"a.jpg","objects":["roller"]}"#;
         let rec = parse_material_json(input).unwrap();
         assert_eq!(rec.file, "a.jpg");
+        assert_eq!(rec.scene_type, "");
         assert_eq!(rec.objects, vec!["roller".to_string()]);
         assert_eq!(rec.board_text, "");
         assert_eq!(rec.other_text, "");
