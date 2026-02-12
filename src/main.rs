@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use cli_ai_analyzer::AnalyzeOptions;
 use clap::Parser;
 use std::collections::HashMap;
@@ -10,9 +11,12 @@ use std::thread;
 use photo_tagger::{
     GroupRecord,
     GroupRecords,
+    ActivityFrame,
     MaterialRecord,
     append_jsonl,
+    classify_activity,
     classify_group_batch,
+    infer_activity_with_gap,
     material_prompt,
     materialize_outputs,
     parse_material_json,
@@ -33,6 +37,8 @@ struct Cli {
     #[arg(long)]
     material: bool,
     #[arg(long)]
+    activity_folders: bool,
+    #[arg(long)]
     out: Option<PathBuf>,
     #[arg(long)]
     overwrite: bool,
@@ -40,6 +46,8 @@ struct Cli {
     skip_existing: bool,
     #[arg(long, default_value_t = MATERIAL_CONCURRENT_DEFAULT)]
     concurrent: usize,
+    #[arg(long, default_value_t = 10)]
+    gap_min: i64,
     #[arg(long)]
     profile: bool,
 }
@@ -60,6 +68,29 @@ fn safe_println(line: &str) {
             let _ = writeln!(std::io::stderr(), "stdout error: {}", e);
         }
     }
+}
+
+fn parse_photo_timestamp(name: &str) -> Option<i64> {
+    let stem = name.split('.').next()?;
+    let mut parts = stem.split('_');
+    let date = parts.next()?;
+    let time = parts.next()?;
+
+    if date.len() != 8 || time.len() != 6 {
+        return None;
+    }
+
+    let y: i32 = date[0..4].parse().ok()?;
+    let m: u32 = date[4..6].parse().ok()?;
+    let d: u32 = date[6..8].parse().ok()?;
+    let hh: u32 = time[0..2].parse().ok()?;
+    let mm: u32 = time[2..4].parse().ok()?;
+    let ss: u32 = time[4..6].parse().ok()?;
+
+    let date = NaiveDate::from_ymd_opt(y, m, d)?;
+    let time = NaiveTime::from_hms_opt(hh, mm, ss)?;
+    let dt = date.and_time(time);
+    Some(Utc.from_utc_datetime(&dt).timestamp())
 }
 
 fn assign_groups(records: &mut GroupRecords) {
@@ -116,6 +147,10 @@ fn main() -> Result<()> {
 
     if cli.material {
         run_material_mode(&cli)?;
+        return Ok(());
+    }
+    if cli.activity_folders {
+        run_activity_folders(&cli)?;
         return Ok(());
     }
 
@@ -385,4 +420,78 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ActivityCsvRow {
+    file: String,
+    board_text: String,
+    other_text: String,
+    notes: String,
+}
+
+fn run_activity_folders(cli: &Cli) -> Result<()> {
+    let base = &cli.path;
+    let csv_path = base.join("analysis.csv");
+    if !csv_path.exists() {
+        anyhow::bail!("analysis.csv not found in {}", base.display());
+    }
+
+    let mut rdr = csv::Reader::from_path(&csv_path)?;
+    let mut rows: Vec<(i64, ActivityCsvRow)> = Vec::new();
+    for result in rdr.deserialize() {
+        let row: ActivityCsvRow = result?;
+        if let Some(ts) = parse_photo_timestamp(&row.file) {
+            rows.push((ts, row));
+        }
+    }
+    rows.sort_by_key(|(ts, _)| *ts);
+
+    let mut prev: Option<ActivityFrame> = None;
+    let mut moves: Vec<(String, String)> = Vec::new();
+
+    for (ts, row) in rows {
+        let combined = format!("{}\n{}\n{}", row.board_text, row.other_text, row.notes);
+        let activity = if let Some(act) = classify_activity(&combined) {
+            act.to_string()
+        } else {
+            let frame = ActivityFrame { activity: String::new(), ts };
+            infer_activity_with_gap(prev.as_ref(), &frame, cli.gap_min)
+        };
+
+        let frame = ActivityFrame {
+            activity: activity.clone(),
+            ts,
+        };
+        prev = Some(frame);
+
+        let src = base.join(&row.file);
+        let dst_dir = base.join(&activity);
+        let dst = dst_dir.join(&row.file);
+        moves.push((src.to_string_lossy().to_string(), dst.to_string_lossy().to_string()));
+
+        if !cli.dry_run {
+            std::fs::create_dir_all(&dst_dir)?;
+            std::fs::rename(&src, &dst)?;
+        }
+    }
+
+    if cli.dry_run {
+        for (src, dst) in moves {
+            safe_println(&format!("MOVE {src} -> {dst}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_timestamp_from_filename() {
+        let ts = parse_photo_timestamp("20260211_235409.jpg").unwrap();
+        assert!(ts > 0);
+    }
 }
