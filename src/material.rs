@@ -164,6 +164,31 @@ pub fn infer_activity_with_gap(
     "未分類".to_string()
 }
 
+pub fn extract_top_keywords(text: &str, k: usize) -> Vec<String> {
+    let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    let mut order: usize = 0;
+
+    for token in text
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '、' || c == '。')
+        .filter(|t| !t.is_empty())
+    {
+        let entry = counts.entry(token.to_string()).or_insert((0, order));
+        entry.0 += 1;
+        order += 1;
+    }
+
+    let mut items: Vec<(String, usize, usize)> = counts
+        .into_iter()
+        .map(|(t, (count, first))| (t, count, first))
+        .collect();
+
+    items.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2))
+    });
+
+    items.into_iter().take(k).map(|(t, _, _)| t).collect()
+}
+
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')? + 1;
@@ -238,5 +263,12 @@ mod tests {
             ts: 1000 + 9 * 60,
         };
         assert_eq!(infer_activity_with_gap(Some(&prev), &curr, 10), "積載量_確認");
+    }
+
+    #[test]
+    fn extract_top_keywords_basic() {
+        let text = "交通保安施設 設置状況 交通保安施設";
+        let kws = extract_top_keywords(text, 2);
+        assert_eq!(kws, vec!["交通保安施設", "設置状況"]);
     }
 }
