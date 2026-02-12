@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::collections::HashMap;
@@ -318,13 +319,13 @@ fn is_board_label(label: &str, include_e_board: bool) -> bool {
     false
 }
 
-fn is_measure_label(label: &str, measure_labels: &[String]) -> bool {
-    let label_norm = normalize_for_match(label);
+fn is_measure_label(label: &str, measure_labels: &[String], rules: &NormalizeRules) -> bool {
+    let label_norm = normalize_for_match_with_rules(label, rules);
     if label_norm.is_empty() {
         return false;
     }
     for k in measure_labels {
-        let k_norm = normalize_for_match(k);
+        let k_norm = normalize_for_match_with_rules(k, rules);
         if k_norm.is_empty() {
             continue;
         }
@@ -366,6 +367,25 @@ pub fn infer_scene_from_objects_with_params(
     measure_threshold: f64,
     measure_labels: &[String],
 ) -> String {
+    let rules = default_normalize_rules();
+    infer_scene_from_objects_with_params_and_rules(
+        objects,
+        include_e_board,
+        board_threshold,
+        measure_threshold,
+        measure_labels,
+        &rules,
+    )
+}
+
+pub fn infer_scene_from_objects_with_params_and_rules(
+    objects: &[ObjectItem],
+    include_e_board: bool,
+    board_threshold: f64,
+    measure_threshold: f64,
+    measure_labels: &[String],
+    rules: &NormalizeRules,
+) -> String {
     let mut max_board = 0.0;
     let mut max_measure = 0.0;
 
@@ -375,7 +395,7 @@ pub fn infer_scene_from_objects_with_params(
                 max_board = obj.area_ratio;
             }
         }
-        if is_measure_label(&obj.label, measure_labels) {
+        if is_measure_label(&obj.label, measure_labels, rules) {
             if obj.area_ratio > max_measure {
                 max_measure = obj.area_ratio;
             }
@@ -392,44 +412,96 @@ pub fn infer_scene_from_objects_with_params(
     "overview".to_string()
 }
 
-fn normalize_for_match(s: &str) -> String {
+#[derive(Clone)]
+pub struct NormalizeRules {
+    pub strip_chars: HashSet<char>,
+}
+
+pub fn default_normalize_rules() -> NormalizeRules {
+    let mut set: HashSet<char> = HashSet::new();
+    for c in [
+        ' ', '\t', '\n', '\r',
+        '.', '．', '。', '、', '，', '､',
+        '-', '‐', '‑', '‒', '–', '—', '―', '－', 'ｰ', 'ー', '_',
+        '・', '･', '/', '／', '\\', '｜', '|',
+        ':', '：', ';', '；',
+        '(', ')', '（', '）', '[', ']', '【', '】', '「', '」', '『', '』',
+        '〈', '〉', '《', '》', '〜', '~',
+    ] {
+        set.insert(c);
+    }
+    for c in ('!'..='~').filter(|c| c.is_ascii_punctuation()) {
+        set.insert(c);
+    }
+    NormalizeRules { strip_chars: set }
+}
+
+pub fn normalize_for_match_with_rules(s: &str, rules: &NormalizeRules) -> String {
     let nfkc = s.nfkc().collect::<String>().to_lowercase();
-    nfkc.chars().filter(|c| !is_noise_char(*c)).collect()
+    nfkc.chars().filter(|c| !rules.strip_chars.contains(c)).collect()
 }
 
-fn is_noise_char(c: char) -> bool {
-    if c.is_whitespace() || c.is_ascii_punctuation() {
-        return true;
-    }
-    matches!(
-        c,
-        '‐' | '‑' | '‒' | '–' | '—' | '―' | '－' | 'ｰ' | 'ー' | '_' | '・' | '･' | '/' | '／'
-            | '\\' | '｜' | '|' | '.' | '．' | '。' | '、' | '，' | '､' | ':' | '：' | ';' | '；'
-            | '(' | ')' | '（' | '）' | '[' | ']' | '【' | '】' | '「' | '」' | '『' | '』'
-            | '〈' | '〉' | '《' | '》' | '〜' | '~'
-    )
+#[derive(Copy, Clone)]
+pub enum MatchMode {
+    Label,
+    Object,
 }
 
-pub fn match_measure_labels(objects: &[ObjectItem], measure_labels: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for label in measure_labels {
-        let label_norm = normalize_for_match(label);
-        if label_norm.is_empty() {
-            continue;
-        }
-        let mut matched = false;
-        for obj in objects {
-            let obj_norm = normalize_for_match(&obj.label);
-            if obj_norm.contains(&label_norm) {
-                matched = true;
-                break;
+pub fn match_measure_labels(
+    objects: &[ObjectItem],
+    measure_labels: &[String],
+    rules: &NormalizeRules,
+    mode: MatchMode,
+) -> Vec<String> {
+    match mode {
+        MatchMode::Label => {
+            let mut out: Vec<String> = Vec::new();
+            for label in measure_labels {
+                let label_norm = normalize_for_match_with_rules(label, rules);
+                if label_norm.is_empty() {
+                    continue;
+                }
+                let mut matched = false;
+                for obj in objects {
+                    let obj_norm = normalize_for_match_with_rules(&obj.label, rules);
+                    if obj_norm.contains(&label_norm) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched {
+                    out.push(label.clone());
+                }
             }
+            out
         }
-        if matched {
-            out.push(label.clone());
+        MatchMode::Object => {
+            let mut out: Vec<String> = Vec::new();
+            for obj in objects {
+                let obj_norm = normalize_for_match_with_rules(&obj.label, rules);
+                if obj_norm.is_empty() {
+                    continue;
+                }
+                let mut matched = false;
+                for label in measure_labels {
+                    let label_norm = normalize_for_match_with_rules(label, rules);
+                    if label_norm.is_empty() {
+                        continue;
+                    }
+                    if obj_norm.contains(&label_norm) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched {
+                    out.push(obj.label.clone());
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
         }
     }
-    out
 }
 
 fn extract_json_object(s: &str) -> Option<&str> {
@@ -707,7 +779,20 @@ mod tests {
             ObjectItem { label: "道路".to_string(), area_ratio: 0.50, ..Default::default() },
         ];
         let labels = vec!["メジャー".to_string(), "レーザー距離計".to_string()];
-        let matched = match_measure_labels(&objects, &labels);
+        let rules = default_normalize_rules();
+        let matched = match_measure_labels(&objects, &labels, &rules, MatchMode::Label);
         assert_eq!(matched, vec!["メジャー".to_string()]);
+    }
+
+    #[test]
+    fn measure_label_matching_reports_objects() {
+        let objects = vec![
+            ObjectItem { label: "ﾒｼﾞｬｰ-12".to_string(), area_ratio: 0.10, ..Default::default() },
+            ObjectItem { label: "道路".to_string(), area_ratio: 0.50, ..Default::default() },
+        ];
+        let labels = vec!["メジャー".to_string(), "レーザー距離計".to_string()];
+        let rules = default_normalize_rules();
+        let matched = match_measure_labels(&objects, &labels, &rules, MatchMode::Object);
+        assert_eq!(matched, vec!["ﾒｼﾞｬｰ-12".to_string()]);
     }
 }

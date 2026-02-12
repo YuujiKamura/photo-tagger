@@ -18,7 +18,11 @@ pub use material::{
     is_e_board_only,
     infer_scene_from_objects,
     infer_scene_from_objects_with_params,
+    infer_scene_from_objects_with_params_and_rules,
     default_measure_labels,
+    default_normalize_rules,
+    NormalizeRules,
+    MatchMode,
     match_measure_labels,
 };
 

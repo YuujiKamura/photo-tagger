@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use cli_ai_analyzer::AnalyzeOptions;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -19,8 +19,11 @@ use photo_tagger::{
     infer_activity_with_gap,
     extract_top_keywords,
     is_e_board_only,
-    infer_scene_from_objects_with_params,
+    infer_scene_from_objects_with_params_and_rules,
     default_measure_labels,
+    default_normalize_rules,
+    NormalizeRules,
+    MatchMode,
     match_measure_labels,
     material_prompt,
     materialize_outputs,
@@ -65,6 +68,16 @@ struct Cli {
     scene_measure_threshold: f64,
     #[arg(long)]
     scene_measure_labels: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = MeasureMatchMode::Label)]
+    scene_measure_matched_mode: MeasureMatchMode,
+    #[arg(long)]
+    scene_normalize_rules: Option<PathBuf>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum MeasureMatchMode {
+    Label,
+    Object,
 }
 
 fn fmt_duration(d: Duration) -> String {
@@ -444,6 +457,14 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
         cli.scene_measure_labels.as_deref(),
         default_measure_labels(),
     )?;
+    let rules = load_normalize_rules(
+        cli.scene_normalize_rules.as_deref(),
+        default_normalize_rules(),
+    )?;
+    let match_mode = match cli.scene_measure_matched_mode {
+        MeasureMatchMode::Label => MatchMode::Label,
+        MeasureMatchMode::Object => MatchMode::Object,
+    };
     let classify_start = Instant::now();
     let mut pending_chunks: Vec<Vec<PathBuf>> = pending
         .chunks(cli.concurrent.max(1))
@@ -468,6 +489,8 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                 let measure_labels = measure_labels.clone();
                 let board_threshold = cli.scene_board_threshold;
                 let measure_threshold = cli.scene_measure_threshold;
+                let rules = rules.clone();
+                let match_mode = match_mode;
 
                 thread::spawn(move || {
                     let record = match cli_ai_analyzer::analyze(
@@ -480,18 +503,19 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                                 if rec.file.is_empty() {
                                     rec.file = fname.clone();
                                 }
-                                rec.scene_type_inferred = infer_scene_from_objects_with_params(
+                                rec.scene_type_inferred = infer_scene_from_objects_with_params_and_rules(
                                     &rec.objects,
                                     include_e_board,
                                     board_threshold,
                                     measure_threshold,
                                     &measure_labels,
+                                    &rules,
                                 );
                                 rec.scene_board_threshold = board_threshold;
                                 rec.scene_measure_threshold = measure_threshold;
                                 rec.scene_measure_labels = measure_labels.clone();
                                 rec.scene_measure_matched_labels =
-                                    match_measure_labels(&rec.objects, &measure_labels);
+                                    match_measure_labels(&rec.objects, &measure_labels, &rules, match_mode);
                                 if !include_e_board && is_e_board_only(&rec.objects) {
                                     rec.scene_type = "overview".to_string();
                                 }
@@ -552,6 +576,24 @@ fn load_measure_labels(path: Option<&std::path::Path>, defaults: Vec<String>) ->
         return Ok(defaults);
     }
     Ok(out)
+}
+
+fn load_normalize_rules(path: Option<&std::path::Path>, defaults: NormalizeRules) -> Result<NormalizeRules> {
+    let Some(path) = path else {
+        return Ok(defaults);
+    };
+    let data = std::fs::read_to_string(path)?;
+    let mut rules = defaults;
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        for ch in line.chars() {
+            rules.strip_chars.insert(ch);
+        }
+    }
+    Ok(rules)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -808,5 +850,14 @@ mod tests {
         let defaults = vec!["メジャー".to_string()];
         let labels = load_measure_labels(Some(&path), defaults).unwrap();
         assert_eq!(labels, vec!["レーザー距離計".to_string(), "メジャー".to_string()]);
+    }
+
+    #[test]
+    fn load_normalize_rules_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules.txt");
+        std::fs::write(&path, "★\n# comment\n").unwrap();
+        let rules = load_normalize_rules(Some(&path), default_normalize_rules()).unwrap();
+        assert!(rules.strip_chars.contains(&'★'));
     }
 }
