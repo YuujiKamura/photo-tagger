@@ -15,6 +15,7 @@ pub use material::{
     classify_activity,
     infer_activity_with_gap,
     extract_top_keywords,
+    is_e_board_only,
 };
 
 use std::collections::HashMap;

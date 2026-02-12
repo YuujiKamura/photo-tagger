@@ -259,6 +259,20 @@ pub fn extract_top_keywords(text: &str, k: usize) -> Vec<String> {
     items.into_iter().take(k).map(|(t, _, _, _)| t).collect()
 }
 
+pub fn is_e_board_only(objects: &[String]) -> bool {
+    let has_e = objects.iter().any(|o| o.contains("電子小黒板") || o.contains("電子黒板"));
+    if !has_e {
+        return false;
+    }
+    let has_physical = objects.iter().any(|o| {
+        (o.contains("黒板") && !o.contains("電子")) ||
+            o.contains("ホワイトボード") ||
+            o.contains("工事用黒板") ||
+            o.contains("手書きボード")
+    });
+    !has_physical
+}
+
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')? + 1;
@@ -365,5 +379,13 @@ mod tests {
         let text = "積載量 確認 処分状況 社内検査";
         let kws = extract_top_keywords(text, 2);
         assert_eq!(kws, vec!["処分状況", "社内検査"]);
+    }
+
+    #[test]
+    fn is_e_board_only_detects_e_board() {
+        let objs = vec!["電子小黒板".to_string(), "道路".to_string()];
+        assert!(is_e_board_only(&objs));
+        let objs2 = vec!["黒板".to_string(), "電子小黒板".to_string()];
+        assert!(!is_e_board_only(&objs2));
     }
 }

@@ -18,6 +18,7 @@ use photo_tagger::{
     classify_group_batch,
     infer_activity_with_gap,
     extract_top_keywords,
+    is_e_board_only,
     material_prompt,
     materialize_outputs,
     parse_material_json,
@@ -37,6 +38,8 @@ struct Cli {
     dry_run: bool,
     #[arg(long)]
     material: bool,
+    #[arg(long)]
+    include_e_board: bool,
     #[arg(long)]
     activity_folders: bool,
     #[arg(long)]
@@ -428,6 +431,7 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
     let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"board_lines":null,"board_fields":null,"other_text":null,"notes":null}"#;
 
     let classify_start = Instant::now();
+    let include_e_board = cli.include_e_board;
     let mut pending_chunks: Vec<Vec<PathBuf>> = pending
         .chunks(cli.concurrent.max(1))
         .map(|c| c.to_vec())
@@ -459,6 +463,9 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                             Ok(mut rec) => {
                                 if rec.file.is_empty() {
                                     rec.file = fname.clone();
+                                }
+                                if !include_e_board && is_e_board_only(&rec.objects) {
+                                    rec.scene_type = "overview".to_string();
                                 }
                                 rec
                             }
