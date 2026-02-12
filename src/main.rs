@@ -21,6 +21,7 @@ use photo_tagger::fs_ops;
 
 const BATCH_SIZE: usize = 10;
 const MAX_CONCURRENT: usize = 3;
+const MATERIAL_CONCURRENT_DEFAULT: usize = 5;
 
 #[derive(Parser)]
 #[command(name = "photo-tagger", version, about = "Classify and group construction photos")]
@@ -36,6 +37,8 @@ struct Cli {
     overwrite: bool,
     #[arg(long)]
     skip_existing: bool,
+    #[arg(long, default_value_t = MATERIAL_CONCURRENT_DEFAULT)]
+    concurrent: usize,
     #[arg(long)]
     profile: bool,
 }
@@ -294,51 +297,68 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
     }
 
     println!(
-        "{} image(s) to analyze (material mode)",
-        pending.len()
+        "{} image(s) to analyze (material mode, {} parallel)",
+        pending.len(),
+        cli.concurrent
     );
 
     let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"other_text":null,"notes":null}"#;
 
     let classify_start = Instant::now();
-    for img in pending {
-        let fname = img
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let prompt = material_prompt(&fname);
+    let mut pending_chunks: Vec<Vec<PathBuf>> = pending
+        .chunks(cli.concurrent.max(1))
+        .map(|c| c.to_vec())
+        .collect();
 
-        let mut options = AnalyzeOptions::default()
-            .json()
-            .with_partial_json(partial_json);
-        if cli.profile {
-            options = options.with_profile_path(&profile_path);
-        }
-        let record = match cli_ai_analyzer::analyze(
-            &prompt,
-            &[&img],
-            options,
-        ) {
-            Ok(raw) => match parse_material_json(&raw) {
-                Ok(mut rec) => {
-                    if rec.file.is_empty() {
-                        rec.file = fname.clone();
-                    }
-                    rec
+    for chunk in pending_chunks.drain(..) {
+        let handles: Vec<_> = chunk
+            .into_iter()
+            .map(|img| {
+                let fname = img
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let prompt = material_prompt(&fname);
+                let mut options = AnalyzeOptions::default()
+                    .json()
+                    .with_partial_json(partial_json);
+                if cli.profile {
+                    options = options.with_profile_path(&profile_path);
                 }
-                Err(e) => MaterialRecord {
-                    error: Some(format!("parse error: {e}")),
-                    ..MaterialRecord::new(&fname)
-                },
-            },
-            Err(e) => MaterialRecord {
-                error: Some(format!("analyze error: {e}")),
-                ..MaterialRecord::new(&fname)
-            },
-        };
 
-        append_jsonl(&jsonl_path, &record)?;
-        println!("  {fname}");
+                thread::spawn(move || {
+                    let record = match cli_ai_analyzer::analyze(
+                        &prompt,
+                        &[&img],
+                        options,
+                    ) {
+                        Ok(raw) => match parse_material_json(&raw) {
+                            Ok(mut rec) => {
+                                if rec.file.is_empty() {
+                                    rec.file = fname.clone();
+                                }
+                                rec
+                            }
+                            Err(e) => MaterialRecord {
+                                error: Some(format!("parse error: {e}")),
+                                ..MaterialRecord::new(&fname)
+                            },
+                        },
+                        Err(e) => MaterialRecord {
+                            error: Some(format!("analyze error: {e}")),
+                            ..MaterialRecord::new(&fname)
+                        },
+                    };
+                    (fname, record)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let (fname, record) = handle.join().expect("worker thread panicked");
+            append_jsonl(&jsonl_path, &record)?;
+            println!("  {fname}");
+        }
     }
     let classify_dur = classify_start.elapsed();
 
