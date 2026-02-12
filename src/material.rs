@@ -165,6 +165,19 @@ pub fn infer_activity_with_gap(
 }
 
 pub fn extract_top_keywords(text: &str, k: usize) -> Vec<String> {
+    let stopwords: std::collections::HashSet<&'static str> = [
+        "工事名",
+        "市道",
+        "舗装補修工事",
+        "工種",
+        "測点",
+        "年月日",
+        "撮影",
+        "写真",
+        "状況",
+    ]
+    .into_iter()
+    .collect();
     let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
     let mut order: usize = 0;
 
@@ -172,6 +185,12 @@ pub fn extract_top_keywords(text: &str, k: usize) -> Vec<String> {
         .split(|c: char| c.is_whitespace() || c == ',' || c == '、' || c == '。')
         .filter(|t| !t.is_empty())
     {
+        if stopwords.contains(token) {
+            continue;
+        }
+        if token.chars().any(|c| c.is_ascii_digit() || c.is_ascii_punctuation()) {
+            continue;
+        }
         let entry = counts.entry(token.to_string()).or_insert((0, order));
         entry.0 += 1;
         order += 1;
@@ -268,6 +287,13 @@ mod tests {
     #[test]
     fn extract_top_keywords_basic() {
         let text = "交通保安施設 設置状況 交通保安施設";
+        let kws = extract_top_keywords(text, 2);
+        assert_eq!(kws, vec!["交通保安施設", "設置状況"]);
+    }
+
+    #[test]
+    fn extract_top_keywords_skips_stopwords() {
+        let text = "工事名 市道 交通保安施設 設置状況";
         let kws = extract_top_keywords(text, 2);
         assert_eq!(kws, vec!["交通保安施設", "設置状況"]);
     }

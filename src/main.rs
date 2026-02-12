@@ -106,6 +106,18 @@ fn make_activity_name(keywords: &[String]) -> String {
     format!("{}_{}", keywords[0], keywords[1])
 }
 
+fn select_focus_text(board_text: &str, other_text: &str, notes: &str) -> String {
+    let bt = board_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(last) = bt.last() {
+        return last.to_string();
+    }
+    format!("{}\n{}\n{}", board_text, other_text, notes)
+}
+
 fn assign_groups(records: &mut GroupRecords) {
     let mut id_to_group: HashMap<String, u32> = HashMap::new();
     let mut next_group = 1u32;
@@ -523,12 +535,12 @@ fn run_activity_folders_auto(cli: &Cli) -> Result<()> {
     let mut moves: Vec<(String, String)> = Vec::new();
 
     for (ts, row) in rows {
-        let combined = format!("{}\n{}\n{}", row.board_text, row.other_text, row.notes);
-        let activity = if combined.trim().is_empty() {
+        let focus = select_focus_text(&row.board_text, &row.other_text, &row.notes);
+        let activity = if focus.trim().is_empty() {
             let frame = ActivityFrame { activity: String::new(), ts };
             infer_activity_with_gap(prev.as_ref(), &frame, cli.gap_min)
         } else {
-            let keywords = extract_top_keywords(&combined, 2);
+            let keywords = extract_top_keywords(&focus, 2);
             make_activity_name(&keywords)
         };
 
@@ -572,5 +584,12 @@ mod tests {
     fn auto_name_from_keywords() {
         let name = make_activity_name(&["交通保安施設".into(), "設置状況".into()]);
         assert_eq!(name, "交通保安施設_設置状況");
+    }
+
+    #[test]
+    fn select_focus_text_last_line() {
+        let bt = "工事名 市道\n交通保安施設 設置状況\n";
+        let text = select_focus_text(bt, "", "");
+        assert_eq!(text, "交通保安施設 設置状況");
     }
 }
