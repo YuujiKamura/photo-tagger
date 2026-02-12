@@ -4,7 +4,14 @@ pub mod material;
 
 pub use domain::{GroupRecord, GroupRecords, classify_group_batch, group_prompt};
 pub use fs_ops::{collect_images_flat, load_group_records, save_group_records};
-pub use material::{MaterialRecord, material_prompt, parse_material_json};
+pub use material::{
+    MaterialRecord,
+    material_prompt,
+    parse_material_json,
+    append_jsonl,
+    read_jsonl,
+    materialize_outputs,
+};
 
 use std::collections::HashMap;
 use std::path::Path;

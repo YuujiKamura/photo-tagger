@@ -1,11 +1,22 @@
 use anyhow::Result;
+use cli_ai_analyzer::AnalyzeOptions;
 use clap::Parser;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::thread;
 
-use photo_tagger::{GroupRecord, GroupRecords, classify_group_batch};
+use photo_tagger::{
+    GroupRecord,
+    GroupRecords,
+    MaterialRecord,
+    append_jsonl,
+    classify_group_batch,
+    material_prompt,
+    materialize_outputs,
+    parse_material_json,
+    read_jsonl,
+};
 use photo_tagger::fs_ops;
 
 const BATCH_SIZE: usize = 10;
@@ -17,6 +28,14 @@ struct Cli {
     path: PathBuf,
     #[arg(long)]
     dry_run: bool,
+    #[arg(long)]
+    material: bool,
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long)]
+    overwrite: bool,
+    #[arg(long)]
+    skip_existing: bool,
     #[arg(long)]
     profile: bool,
 }
@@ -81,6 +100,11 @@ fn print_group_summary(records: &GroupRecords) {
 fn main() -> Result<()> {
     let total_start = Instant::now();
     let cli = Cli::parse();
+
+    if cli.material {
+        run_material_mode(&cli)?;
+        return Ok(());
+    }
 
     let mut records = fs_ops::load_group_records(&cli.path);
 
@@ -193,6 +217,122 @@ fn main() -> Result<()> {
     if cli.dry_run {
         println!("\n(dry-run: no files saved)");
     }
+
+    let total_dur = total_start.elapsed();
+    if cli.profile {
+        println!("\n--- Profile ---");
+        println!("  {:<12} {:>8}", "collect:", fmt_duration(collect_dur));
+        println!("  {:<12} {:>8}", "classify:", fmt_duration(classify_dur));
+        println!("  {:<12} {:>8}", "total:", fmt_duration(total_dur));
+    } else {
+        println!("\nCompleted in {}.", fmt_duration(total_dur));
+    }
+
+    Ok(())
+}
+
+fn run_material_mode(cli: &Cli) -> Result<()> {
+    let total_start = Instant::now();
+    let t = Instant::now();
+    let images = fs_ops::collect_images_flat(&cli.path);
+    let collect_dur = t.elapsed();
+
+    if images.is_empty() {
+        println!("No images found in {}", cli.path.display());
+        return Ok(());
+    }
+
+    let out_dir = cli.out.clone().unwrap_or_else(|| cli.path.clone());
+    std::fs::create_dir_all(&out_dir)?;
+
+    let jsonl_path = out_dir.join("analysis.jsonl");
+    let json_path = out_dir.join("analysis.json");
+    let csv_path = out_dir.join("analysis.csv");
+
+    if cli.overwrite {
+        let _ = std::fs::remove_file(&jsonl_path);
+        let _ = std::fs::remove_file(&json_path);
+        let _ = std::fs::remove_file(&csv_path);
+    } else if (jsonl_path.exists() || json_path.exists() || csv_path.exists()) && !cli.skip_existing {
+        anyhow::bail!(
+            "analysis.* exists in {} (use --overwrite or --skip-existing)",
+            out_dir.display()
+        );
+    }
+
+    let mut existing = std::collections::HashSet::new();
+    if cli.skip_existing {
+        let records = read_jsonl(&jsonl_path)?;
+        for rec in records {
+            existing.insert(rec.file);
+        }
+    }
+
+    let pending: Vec<_> = images
+        .iter()
+        .filter(|img| {
+            let name = img
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default()
+                .to_string();
+            !existing.contains(&name)
+        })
+        .cloned()
+        .collect();
+
+    let skip = images.len() - pending.len();
+    if skip > 0 {
+        println!("Skipping {skip} already analyzed.");
+    }
+    if pending.is_empty() {
+        println!("All {} images analyzed.", images.len());
+        materialize_outputs(&jsonl_path, &out_dir)?;
+        return Ok(());
+    }
+
+    println!(
+        "{} image(s) to analyze (material mode)",
+        pending.len()
+    );
+
+    let classify_start = Instant::now();
+    for img in pending {
+        let fname = img
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let prompt = material_prompt(&fname);
+
+        let record = match cli_ai_analyzer::analyze(
+            &prompt,
+            &[&img],
+            AnalyzeOptions::default().json(),
+        ) {
+            Ok(raw) => match parse_material_json(&raw) {
+                Ok(mut rec) => {
+                    if rec.file.is_empty() {
+                        rec.file = fname.clone();
+                    }
+                    rec
+                }
+                Err(e) => MaterialRecord {
+                    error: Some(format!("parse error: {e}")),
+                    ..MaterialRecord::new(&fname)
+                },
+            },
+            Err(e) => MaterialRecord {
+                error: Some(format!("analyze error: {e}")),
+                ..MaterialRecord::new(&fname)
+            },
+        };
+
+        append_jsonl(&jsonl_path, &record)?;
+        println!("  {fname}");
+    }
+    let classify_dur = classify_start.elapsed();
+
+    materialize_outputs(&jsonl_path, &out_dir)?;
 
     let total_dur = total_start.elapsed();
     if cli.profile {
