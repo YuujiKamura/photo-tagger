@@ -2,6 +2,7 @@ use anyhow::Result;
 use cli_ai_analyzer::AnalyzeOptions;
 use clap::Parser;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::thread;
@@ -49,6 +50,15 @@ fn fmt_duration(d: Duration) -> String {
         format!("{ms}ms")
     } else {
         format!("{:.1}s", d.as_secs_f64())
+    }
+}
+
+fn safe_println(line: &str) {
+    let mut out = std::io::stdout();
+    if let Err(e) = writeln!(out, "{}", line) {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            let _ = writeln!(std::io::stderr(), "stdout error: {}", e);
+        }
     }
 }
 
@@ -116,7 +126,7 @@ fn main() -> Result<()> {
     let collect_dur = t.elapsed();
 
     if images.is_empty() {
-        println!("No images found in {}", cli.path.display());
+        safe_println(&format!("No images found in {}", cli.path.display()));
         return Ok(());
     }
 
@@ -288,19 +298,19 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
 
     let skip = images.len() - pending.len();
     if skip > 0 {
-        println!("Skipping {skip} already analyzed.");
+        safe_println(&format!("Skipping {skip} already analyzed."));
     }
     if pending.is_empty() {
-        println!("All {} images analyzed.", images.len());
+        safe_println(&format!("All {} images analyzed.", images.len()));
         materialize_outputs(&jsonl_path, &out_dir)?;
         return Ok(());
     }
 
-    println!(
+    safe_println(&format!(
         "{} image(s) to analyze (material mode, {} parallel)",
         pending.len(),
         cli.concurrent
-    );
+    ));
 
     let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"other_text":null,"notes":null}"#;
 
@@ -357,7 +367,7 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
         for handle in handles {
             let (fname, record) = handle.join().expect("worker thread panicked");
             append_jsonl(&jsonl_path, &record)?;
-            println!("  {fname}");
+            safe_println(&format!("  {fname}"));
         }
     }
     let classify_dur = classify_start.elapsed();
@@ -366,12 +376,12 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
 
     let total_dur = total_start.elapsed();
     if cli.profile {
-        println!("\n--- Profile ---");
-        println!("  {:<12} {:>8}", "collect:", fmt_duration(collect_dur));
-        println!("  {:<12} {:>8}", "classify:", fmt_duration(classify_dur));
-        println!("  {:<12} {:>8}", "total:", fmt_duration(total_dur));
+        safe_println("\n--- Profile ---");
+        safe_println(&format!("  {:<12} {:>8}", "collect:", fmt_duration(collect_dur)));
+        safe_println(&format!("  {:<12} {:>8}", "classify:", fmt_duration(classify_dur)));
+        safe_println(&format!("  {:<12} {:>8}", "total:", fmt_duration(total_dur)));
     } else {
-        println!("\nCompleted in {}.", fmt_duration(total_dur));
+        safe_println(&format!("\nCompleted in {}.", fmt_duration(total_dur)));
     }
 
     Ok(())
