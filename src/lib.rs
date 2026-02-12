@@ -19,6 +19,7 @@ pub use material::{
     infer_scene_from_objects,
     infer_scene_from_objects_with_params,
     default_measure_labels,
+    match_measure_labels,
 };
 
 use std::collections::HashMap;

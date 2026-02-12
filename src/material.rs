@@ -18,6 +18,8 @@ pub struct MaterialRecord {
     pub scene_measure_threshold: f64,
     #[serde(default)]
     pub scene_measure_labels: Vec<String>,
+    #[serde(default)]
+    pub scene_measure_matched_labels: Vec<String>,
     pub board_text: String,
     pub board_lines: Vec<String>,
     pub board_fields: HashMap<String, String>,
@@ -36,6 +38,7 @@ struct MaterialRecordPartial {
     scene_board_threshold: Option<f64>,
     scene_measure_threshold: Option<f64>,
     scene_measure_labels: Option<Vec<String>>,
+    scene_measure_matched_labels: Option<Vec<String>>,
     board_text: Option<String>,
     board_lines: Option<Vec<String>>,
     board_fields: Option<HashMap<String, String>>,
@@ -54,6 +57,7 @@ impl MaterialRecord {
             scene_board_threshold: 0.0,
             scene_measure_threshold: 0.0,
             scene_measure_labels: Vec::new(),
+            scene_measure_matched_labels: Vec::new(),
             board_text: String::new(),
             board_lines: Vec::new(),
             board_fields: HashMap::new(),
@@ -91,6 +95,7 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
         scene_board_threshold: partial.scene_board_threshold.unwrap_or_default(),
         scene_measure_threshold: partial.scene_measure_threshold.unwrap_or_default(),
         scene_measure_labels: partial.scene_measure_labels.unwrap_or_default(),
+        scene_measure_matched_labels: partial.scene_measure_matched_labels.unwrap_or_default(),
         board_text: partial.board_text.unwrap_or_default(),
         board_lines: partial.board_lines.unwrap_or_default(),
         board_fields: partial.board_fields.unwrap_or_default(),
@@ -152,6 +157,7 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
             scene_board_threshold: rec.scene_board_threshold,
             scene_measure_threshold: rec.scene_measure_threshold,
             scene_measure_labels: rec.scene_measure_labels.join("; "),
+            scene_measure_matched_labels: rec.scene_measure_matched_labels.join("; "),
             board_text: rec.board_text,
             board_lines: rec.board_lines.join(" / "),
             board_fields: serde_json::to_string(&rec.board_fields).unwrap_or_default(),
@@ -388,7 +394,42 @@ pub fn infer_scene_from_objects_with_params(
 
 fn normalize_for_match(s: &str) -> String {
     let nfkc = s.nfkc().collect::<String>().to_lowercase();
-    nfkc.split_whitespace().collect::<String>()
+    nfkc.chars().filter(|c| !is_noise_char(*c)).collect()
+}
+
+fn is_noise_char(c: char) -> bool {
+    if c.is_whitespace() || c.is_ascii_punctuation() {
+        return true;
+    }
+    matches!(
+        c,
+        '‐' | '‑' | '‒' | '–' | '—' | '―' | '－' | 'ｰ' | 'ー' | '_' | '・' | '･' | '/' | '／'
+            | '\\' | '｜' | '|' | '.' | '．' | '。' | '、' | '，' | '､' | ':' | '：' | ';' | '；'
+            | '(' | ')' | '（' | '）' | '[' | ']' | '【' | '】' | '「' | '」' | '『' | '』'
+            | '〈' | '〉' | '《' | '》' | '〜' | '~'
+    )
+}
+
+pub fn match_measure_labels(objects: &[ObjectItem], measure_labels: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for label in measure_labels {
+        let label_norm = normalize_for_match(label);
+        if label_norm.is_empty() {
+            continue;
+        }
+        let mut matched = false;
+        for obj in objects {
+            let obj_norm = normalize_for_match(&obj.label);
+            if obj_norm.contains(&label_norm) {
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            out.push(label.clone());
+        }
+    }
+    out
 }
 
 fn extract_json_object(s: &str) -> Option<&str> {
@@ -407,6 +448,7 @@ struct MaterialCsvRow {
     scene_board_threshold: f64,
     scene_measure_threshold: f64,
     scene_measure_labels: String,
+    scene_measure_matched_labels: String,
     board_text: String,
     board_lines: String,
     board_fields: String,
@@ -634,7 +676,7 @@ mod tests {
     #[test]
     fn infer_scene_with_normalized_labels() {
         let objects = vec![
-            ObjectItem { label: "ﾒｼﾞｬｰ".to_string(), area_ratio: 0.30, ..Default::default() },
+            ObjectItem { label: "ﾒｼﾞｬｰ-12".to_string(), area_ratio: 0.30, ..Default::default() },
         ];
         let labels = vec!["メジャー".to_string()];
         let scene = infer_scene_from_objects_with_params(&objects, false, 0.15, 0.25, &labels);
@@ -655,5 +697,17 @@ mod tests {
         assert!(csv.contains("scene_board_threshold"));
         assert!(csv.contains("scene_measure_threshold"));
         assert!(csv.contains("scene_measure_labels"));
+        assert!(csv.contains("scene_measure_matched_labels"));
+    }
+
+    #[test]
+    fn measure_label_matching_reports_labels() {
+        let objects = vec![
+            ObjectItem { label: "ﾒｼﾞｬｰ-12".to_string(), area_ratio: 0.10, ..Default::default() },
+            ObjectItem { label: "道路".to_string(), area_ratio: 0.50, ..Default::default() },
+        ];
+        let labels = vec!["メジャー".to_string(), "レーザー距離計".to_string()];
+        let matched = match_measure_labels(&objects, &labels);
+        assert_eq!(matched, vec!["メジャー".to_string()]);
     }
 }

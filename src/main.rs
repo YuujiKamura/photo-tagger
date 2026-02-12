@@ -21,6 +21,7 @@ use photo_tagger::{
     is_e_board_only,
     infer_scene_from_objects_with_params,
     default_measure_labels,
+    match_measure_labels,
     material_prompt,
     materialize_outputs,
     parse_material_json,
@@ -489,6 +490,8 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                                 rec.scene_board_threshold = board_threshold;
                                 rec.scene_measure_threshold = measure_threshold;
                                 rec.scene_measure_labels = measure_labels.clone();
+                                rec.scene_measure_matched_labels =
+                                    match_measure_labels(&rec.objects, &measure_labels);
                                 if !include_e_board && is_e_board_only(&rec.objects) {
                                     rec.scene_type = "overview".to_string();
                                 }
