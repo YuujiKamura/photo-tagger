@@ -9,7 +9,7 @@ use std::path::Path;
 pub struct MaterialRecord {
     pub file: String,
     pub scene_type: String,
-    pub objects: Vec<String>,
+    pub objects: Vec<ObjectItem>,
     pub board_text: String,
     pub board_lines: Vec<String>,
     pub board_fields: HashMap<String, String>,
@@ -23,7 +23,7 @@ pub struct MaterialRecord {
 struct MaterialRecordPartial {
     file: Option<String>,
     scene_type: Option<String>,
-    objects: Option<Vec<String>>,
+    objects: Option<Vec<ObjectValue>>,
     board_text: Option<String>,
     board_lines: Option<Vec<String>>,
     board_fields: Option<HashMap<String, String>>,
@@ -50,10 +50,10 @@ impl MaterialRecord {
 
 pub fn material_prompt(file: &str) -> String {
     format!(
-        r#"次の画像について、写っている物体と文字情報だけを抽出せよ。推測や分類は不要。Output ONLY JSON object: {{"file":"{file}","scene_type":"overview|board_with_measure|measure_closeup","objects":["..."],"board_text":"","other_text":"","notes":""}}
+        r#"次の画像について、写っている物体と文字情報だけを抽出せよ。推測や分類は不要。Output ONLY JSON object: {{"file":"{file}","scene_type":"overview|board_with_measure|measure_closeup","objects":[{{"label":"","bbox":{{"x":0,"y":0,"w":0,"h":0}},"area_ratio":0}}],"board_text":"","other_text":"","notes":""}}
 対象ファイル: {file}
 scene_type: 写真タイプは3択のみ (overview / board_with_measure / measure_closeup)
-objects: 写っている物体の短いリスト（例: ローラー, アスファルト, 作業員, 看板）
+objects: 写っている主要物体を最大8件。各要素は {{label, bbox, area_ratio}}。bboxは0..1の正規化座標。
 board_text: 黒板があればその文字をそのまま
 board_lines: 黒板の各行を配列で返す
 board_fields: 黒板のラベル(例: 工事名, 工種, 測点, 処分状況)をキーにした辞書
@@ -70,7 +70,7 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
     Ok(MaterialRecord {
         file: partial.file.unwrap_or_default(),
         scene_type: partial.scene_type.unwrap_or_default(),
-        objects: partial.objects.unwrap_or_default(),
+        objects: normalize_objects(partial.objects.unwrap_or_default()),
         board_text: partial.board_text.unwrap_or_default(),
         board_lines: partial.board_lines.unwrap_or_default(),
         board_fields: partial.board_fields.unwrap_or_default(),
@@ -126,7 +126,8 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
         let row = MaterialCsvRow {
             file: rec.file,
             scene_type: rec.scene_type,
-            objects: rec.objects.join("; "),
+            objects: rec.objects.iter().map(|o| o.label.clone()).collect::<Vec<_>>().join("; "),
+            objects_json: serde_json::to_string(&rec.objects).unwrap_or_default(),
             board_text: rec.board_text,
             board_lines: rec.board_lines.join(" / "),
             board_fields: serde_json::to_string(&rec.board_fields).unwrap_or_default(),
@@ -259,16 +260,16 @@ pub fn extract_top_keywords(text: &str, k: usize) -> Vec<String> {
     items.into_iter().take(k).map(|(t, _, _, _)| t).collect()
 }
 
-pub fn is_e_board_only(objects: &[String]) -> bool {
-    let has_e = objects.iter().any(|o| o.contains("電子小黒板") || o.contains("電子黒板"));
+pub fn is_e_board_only(objects: &[ObjectItem]) -> bool {
+    let has_e = objects.iter().any(|o| o.label.contains("電子小黒板") || o.label.contains("電子黒板"));
     if !has_e {
         return false;
     }
     let has_physical = objects.iter().any(|o| {
-        (o.contains("黒板") && !o.contains("電子")) ||
-            o.contains("ホワイトボード") ||
-            o.contains("工事用黒板") ||
-            o.contains("手書きボード")
+        (o.label.contains("黒板") && !o.label.contains("電子")) ||
+            o.label.contains("ホワイトボード") ||
+            o.label.contains("工事用黒板") ||
+            o.label.contains("手書きボード")
     });
     !has_physical
 }
@@ -284,12 +285,50 @@ struct MaterialCsvRow {
     file: String,
     scene_type: String,
     objects: String,
+    objects_json: String,
     board_text: String,
     board_lines: String,
     board_fields: String,
     other_text: String,
     notes: String,
     error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectBBox {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectItem {
+    pub label: String,
+    #[serde(default)]
+    pub bbox: ObjectBBox,
+    #[serde(default)]
+    pub area_ratio: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ObjectValue {
+    Obj(ObjectItem),
+    Str(String),
+}
+
+fn normalize_objects(values: Vec<ObjectValue>) -> Vec<ObjectItem> {
+    values
+        .into_iter()
+        .map(|v| match v {
+            ObjectValue::Obj(o) => o,
+            ObjectValue::Str(s) => ObjectItem {
+                label: s,
+                ..Default::default()
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -302,7 +341,8 @@ mod tests {
         let rec = parse_material_json(input).unwrap();
         assert_eq!(rec.file, "a.jpg");
         assert_eq!(rec.scene_type, "");
-        assert_eq!(rec.objects, vec!["roller".to_string()]);
+        assert_eq!(rec.objects.len(), 1);
+        assert_eq!(rec.objects[0].label, "roller");
         assert_eq!(rec.board_text, "");
         assert!(rec.board_lines.is_empty());
         assert!(rec.board_fields.is_empty());
@@ -318,7 +358,10 @@ mod tests {
         let rec1 = MaterialRecord::new("a.jpg");
         let rec2 = MaterialRecord {
             file: "b.jpg".into(),
-            objects: vec!["roller".into()],
+            objects: vec![ObjectItem {
+                label: "roller".into(),
+                ..Default::default()
+            }],
             ..MaterialRecord::new("b.jpg")
         };
         append_jsonl(&jsonl, &rec1).unwrap();
@@ -328,6 +371,17 @@ mod tests {
 
         assert!(dir.path().join("analysis.json").exists());
         assert!(dir.path().join("analysis.csv").exists());
+    }
+
+    #[test]
+    fn csv_includes_objects_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("analysis.jsonl");
+        let rec = MaterialRecord::new("a.jpg");
+        append_jsonl(&jsonl, &rec).unwrap();
+        materialize_outputs(&jsonl, dir.path()).unwrap();
+        let csv = std::fs::read_to_string(dir.path().join("analysis.csv")).unwrap();
+        assert!(csv.contains("objects_json"));
     }
 
     #[test]
@@ -383,9 +437,24 @@ mod tests {
 
     #[test]
     fn is_e_board_only_detects_e_board() {
-        let objs = vec!["電子小黒板".to_string(), "道路".to_string()];
+        let objs = vec![
+            ObjectItem { label: "電子小黒板".to_string(), ..Default::default() },
+            ObjectItem { label: "道路".to_string(), ..Default::default() },
+        ];
         assert!(is_e_board_only(&objs));
-        let objs2 = vec!["黒板".to_string(), "電子小黒板".to_string()];
+        let objs2 = vec![
+            ObjectItem { label: "黒板".to_string(), ..Default::default() },
+            ObjectItem { label: "電子小黒板".to_string(), ..Default::default() },
+        ];
         assert!(!is_e_board_only(&objs2));
+    }
+
+    #[test]
+    fn parse_objects_with_bbox() {
+        let input = r#"{"file":"a.jpg","objects":[{"label":"看板","bbox":{"x":0.1,"y":0.2,"w":0.3,"h":0.4},"area_ratio":0.12}]}"#;
+        let rec = parse_material_json(input).unwrap();
+        assert_eq!(rec.objects.len(), 1);
+        assert_eq!(rec.objects[0].label, "看板");
+        assert_eq!(rec.objects[0].bbox.w, 0.3);
     }
 }
