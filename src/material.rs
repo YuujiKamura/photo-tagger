@@ -293,8 +293,12 @@ fn is_board_label(label: &str, include_e_board: bool) -> bool {
     false
 }
 
-fn is_measure_label(label: &str) -> bool {
-    let keywords = [
+fn is_measure_label(label: &str, measure_labels: &[String]) -> bool {
+    measure_labels.iter().any(|k| label.contains(k))
+}
+
+pub fn default_measure_labels() -> Vec<String> {
+    [
         "メジャー",
         "巻尺",
         "定規",
@@ -306,11 +310,24 @@ fn is_measure_label(label: &str) -> bool {
         "温度計",
         "計測",
         "測定",
-    ];
-    keywords.iter().any(|k| label.contains(k))
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub fn infer_scene_from_objects(objects: &[ObjectItem], include_e_board: bool) -> String {
+    let labels = default_measure_labels();
+    infer_scene_from_objects_with_params(objects, include_e_board, 0.15, 0.25, &labels)
+}
+
+pub fn infer_scene_from_objects_with_params(
+    objects: &[ObjectItem],
+    include_e_board: bool,
+    board_threshold: f64,
+    measure_threshold: f64,
+    measure_labels: &[String],
+) -> String {
     let mut max_board = 0.0;
     let mut max_measure = 0.0;
 
@@ -320,7 +337,7 @@ pub fn infer_scene_from_objects(objects: &[ObjectItem], include_e_board: bool) -
                 max_board = obj.area_ratio;
             }
         }
-        if is_measure_label(&obj.label) {
+        if is_measure_label(&obj.label, measure_labels) {
             if obj.area_ratio > max_measure {
                 max_measure = obj.area_ratio;
             }
@@ -328,10 +345,10 @@ pub fn infer_scene_from_objects(objects: &[ObjectItem], include_e_board: bool) -
     }
 
     // Heuristic thresholds: closeup if measurement object dominates; otherwise board+measure.
-    if max_measure >= 0.25 {
+    if max_measure >= measure_threshold {
         return "measure_closeup".to_string();
     }
-    if max_board >= 0.15 || (max_board > 0.0 && max_measure > 0.0) {
+    if max_board >= board_threshold || (max_board > 0.0 && max_measure > 0.0) {
         return "board_with_measure".to_string();
     }
     "overview".to_string()
@@ -552,5 +569,25 @@ mod tests {
         assert_eq!(scene, "overview");
         let scene_include = infer_scene_from_objects(&objects, true);
         assert_eq!(scene_include, "board_with_measure");
+    }
+
+    #[test]
+    fn infer_scene_with_custom_thresholds() {
+        let objects = vec![
+            ObjectItem { label: "メジャー".to_string(), area_ratio: 0.20, ..Default::default() },
+        ];
+        let labels = vec!["メジャー".to_string()];
+        let scene = infer_scene_from_objects_with_params(&objects, false, 0.10, 0.15, &labels);
+        assert_eq!(scene, "measure_closeup");
+    }
+
+    #[test]
+    fn infer_scene_with_custom_measure_labels() {
+        let objects = vec![
+            ObjectItem { label: "レーザー距離計".to_string(), area_ratio: 0.30, ..Default::default() },
+        ];
+        let labels = vec!["レーザー距離計".to_string()];
+        let scene = infer_scene_from_objects_with_params(&objects, false, 0.15, 0.25, &labels);
+        assert_eq!(scene, "measure_closeup");
     }
 }

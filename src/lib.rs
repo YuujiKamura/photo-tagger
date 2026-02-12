@@ -17,6 +17,8 @@ pub use material::{
     extract_top_keywords,
     is_e_board_only,
     infer_scene_from_objects,
+    infer_scene_from_objects_with_params,
+    default_measure_labels,
 };
 
 use std::collections::HashMap;

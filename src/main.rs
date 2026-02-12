@@ -19,7 +19,8 @@ use photo_tagger::{
     infer_activity_with_gap,
     extract_top_keywords,
     is_e_board_only,
-    infer_scene_from_objects,
+    infer_scene_from_objects_with_params,
+    default_measure_labels,
     material_prompt,
     materialize_outputs,
     parse_material_json,
@@ -57,6 +58,12 @@ struct Cli {
     gap_min: i64,
     #[arg(long)]
     profile: bool,
+    #[arg(long, default_value_t = 0.15)]
+    scene_board_threshold: f64,
+    #[arg(long, default_value_t = 0.25)]
+    scene_measure_threshold: f64,
+    #[arg(long)]
+    scene_measure_labels: Option<PathBuf>,
 }
 
 fn fmt_duration(d: Duration) -> String {
@@ -431,8 +438,12 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
 
     let partial_json = r#"{"file":null,"scene_type":null,"objects":null,"board_text":null,"board_lines":null,"board_fields":null,"other_text":null,"notes":null}"#;
 
-    let classify_start = Instant::now();
     let include_e_board = cli.include_e_board;
+    let measure_labels = load_measure_labels(
+        cli.scene_measure_labels.as_deref(),
+        default_measure_labels(),
+    )?;
+    let classify_start = Instant::now();
     let mut pending_chunks: Vec<Vec<PathBuf>> = pending
         .chunks(cli.concurrent.max(1))
         .map(|c| c.to_vec())
@@ -453,6 +464,9 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                 if cli.profile {
                     options = options.with_profile_path(&profile_path);
                 }
+                let measure_labels = measure_labels.clone();
+                let board_threshold = cli.scene_board_threshold;
+                let measure_threshold = cli.scene_measure_threshold;
 
                 thread::spawn(move || {
                     let record = match cli_ai_analyzer::analyze(
@@ -465,8 +479,13 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                                 if rec.file.is_empty() {
                                     rec.file = fname.clone();
                                 }
-                                rec.scene_type_inferred =
-                                    infer_scene_from_objects(&rec.objects, include_e_board);
+                                rec.scene_type_inferred = infer_scene_from_objects_with_params(
+                                    &rec.objects,
+                                    include_e_board,
+                                    board_threshold,
+                                    measure_threshold,
+                                    &measure_labels,
+                                );
                                 if !include_e_board && is_e_board_only(&rec.objects) {
                                     rec.scene_type = "overview".to_string();
                                 }
@@ -508,6 +527,25 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_measure_labels(path: Option<&std::path::Path>, defaults: Vec<String>) -> Result<Vec<String>> {
+    let Some(path) = path else {
+        return Ok(defaults);
+    };
+    let data = std::fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if out.is_empty() {
+        return Ok(defaults);
+    }
+    Ok(out)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -754,5 +792,15 @@ mod tests {
         };
         let name = auto_activity_name_from_row(&row, None, 10, 0);
         assert_eq!(name, "処分状況_社内検査");
+    }
+
+    #[test]
+    fn load_measure_labels_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.txt");
+        std::fs::write(&path, "レーザー距離計\n# comment\n\nメジャー\n").unwrap();
+        let defaults = vec!["メジャー".to_string()];
+        let labels = load_measure_labels(Some(&path), defaults).unwrap();
+        assert_eq!(labels, vec!["レーザー距離計".to_string(), "メジャー".to_string()]);
     }
 }
