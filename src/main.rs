@@ -486,6 +486,9 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                                     measure_threshold,
                                     &measure_labels,
                                 );
+                                rec.scene_board_threshold = board_threshold;
+                                rec.scene_measure_threshold = measure_threshold;
+                                rec.scene_measure_labels = measure_labels.clone();
                                 if !include_e_board && is_e_board_only(&rec.objects) {
                                     rec.scene_type = "overview".to_string();
                                 }

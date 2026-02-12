@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::collections::HashMap;
@@ -11,6 +12,12 @@ pub struct MaterialRecord {
     pub scene_type: String,
     pub scene_type_inferred: String,
     pub objects: Vec<ObjectItem>,
+    #[serde(default)]
+    pub scene_board_threshold: f64,
+    #[serde(default)]
+    pub scene_measure_threshold: f64,
+    #[serde(default)]
+    pub scene_measure_labels: Vec<String>,
     pub board_text: String,
     pub board_lines: Vec<String>,
     pub board_fields: HashMap<String, String>,
@@ -26,6 +33,9 @@ struct MaterialRecordPartial {
     scene_type: Option<String>,
     scene_type_inferred: Option<String>,
     objects: Option<Vec<ObjectValue>>,
+    scene_board_threshold: Option<f64>,
+    scene_measure_threshold: Option<f64>,
+    scene_measure_labels: Option<Vec<String>>,
     board_text: Option<String>,
     board_lines: Option<Vec<String>>,
     board_fields: Option<HashMap<String, String>>,
@@ -41,6 +51,9 @@ impl MaterialRecord {
             scene_type: String::new(),
             scene_type_inferred: String::new(),
             objects: Vec::new(),
+            scene_board_threshold: 0.0,
+            scene_measure_threshold: 0.0,
+            scene_measure_labels: Vec::new(),
             board_text: String::new(),
             board_lines: Vec::new(),
             board_fields: HashMap::new(),
@@ -75,6 +88,9 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
         scene_type: partial.scene_type.unwrap_or_default(),
         scene_type_inferred: partial.scene_type_inferred.unwrap_or_default(),
         objects: normalize_objects(partial.objects.unwrap_or_default()),
+        scene_board_threshold: partial.scene_board_threshold.unwrap_or_default(),
+        scene_measure_threshold: partial.scene_measure_threshold.unwrap_or_default(),
+        scene_measure_labels: partial.scene_measure_labels.unwrap_or_default(),
         board_text: partial.board_text.unwrap_or_default(),
         board_lines: partial.board_lines.unwrap_or_default(),
         board_fields: partial.board_fields.unwrap_or_default(),
@@ -133,6 +149,9 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
             scene_type_inferred: rec.scene_type_inferred,
             objects: rec.objects.iter().map(|o| o.label.clone()).collect::<Vec<_>>().join("; "),
             objects_json: serde_json::to_string(&rec.objects).unwrap_or_default(),
+            scene_board_threshold: rec.scene_board_threshold,
+            scene_measure_threshold: rec.scene_measure_threshold,
+            scene_measure_labels: rec.scene_measure_labels.join("; "),
             board_text: rec.board_text,
             board_lines: rec.board_lines.join(" / "),
             board_fields: serde_json::to_string(&rec.board_fields).unwrap_or_default(),
@@ -294,7 +313,20 @@ fn is_board_label(label: &str, include_e_board: bool) -> bool {
 }
 
 fn is_measure_label(label: &str, measure_labels: &[String]) -> bool {
-    measure_labels.iter().any(|k| label.contains(k))
+    let label_norm = normalize_for_match(label);
+    if label_norm.is_empty() {
+        return false;
+    }
+    for k in measure_labels {
+        let k_norm = normalize_for_match(k);
+        if k_norm.is_empty() {
+            continue;
+        }
+        if label_norm.contains(&k_norm) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn default_measure_labels() -> Vec<String> {
@@ -354,6 +386,11 @@ pub fn infer_scene_from_objects_with_params(
     "overview".to_string()
 }
 
+fn normalize_for_match(s: &str) -> String {
+    let nfkc = s.nfkc().collect::<String>().to_lowercase();
+    nfkc.split_whitespace().collect::<String>()
+}
+
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')? + 1;
@@ -367,6 +404,9 @@ struct MaterialCsvRow {
     scene_type_inferred: String,
     objects: String,
     objects_json: String,
+    scene_board_threshold: f64,
+    scene_measure_threshold: f64,
+    scene_measure_labels: String,
     board_text: String,
     board_lines: String,
     board_fields: String,
@@ -589,5 +629,31 @@ mod tests {
         let labels = vec!["レーザー距離計".to_string()];
         let scene = infer_scene_from_objects_with_params(&objects, false, 0.15, 0.25, &labels);
         assert_eq!(scene, "measure_closeup");
+    }
+
+    #[test]
+    fn infer_scene_with_normalized_labels() {
+        let objects = vec![
+            ObjectItem { label: "ﾒｼﾞｬｰ".to_string(), area_ratio: 0.30, ..Default::default() },
+        ];
+        let labels = vec!["メジャー".to_string()];
+        let scene = infer_scene_from_objects_with_params(&objects, false, 0.15, 0.25, &labels);
+        assert_eq!(scene, "measure_closeup");
+    }
+
+    #[test]
+    fn csv_includes_scene_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("analysis.jsonl");
+        let mut rec = MaterialRecord::new("a.jpg");
+        rec.scene_board_threshold = 0.12;
+        rec.scene_measure_threshold = 0.24;
+        rec.scene_measure_labels = vec!["メジャー".to_string()];
+        append_jsonl(&jsonl, &rec).unwrap();
+        materialize_outputs(&jsonl, dir.path()).unwrap();
+        let csv = std::fs::read_to_string(dir.path().join("analysis.csv")).unwrap();
+        assert!(csv.contains("scene_board_threshold"));
+        assert!(csv.contains("scene_measure_threshold"));
+        assert!(csv.contains("scene_measure_labels"));
     }
 }
