@@ -248,11 +248,13 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
     let jsonl_path = out_dir.join("analysis.jsonl");
     let json_path = out_dir.join("analysis.json");
     let csv_path = out_dir.join("analysis.csv");
+    let profile_path = out_dir.join("analysis.profile.jsonl");
 
     if cli.overwrite {
         let _ = std::fs::remove_file(&jsonl_path);
         let _ = std::fs::remove_file(&json_path);
         let _ = std::fs::remove_file(&csv_path);
+        let _ = std::fs::remove_file(&profile_path);
     } else if (jsonl_path.exists() || json_path.exists() || csv_path.exists()) && !cli.skip_existing {
         anyhow::bail!(
             "analysis.* exists in {} (use --overwrite or --skip-existing)",
@@ -304,10 +306,14 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
             .unwrap_or_else(|| "unknown".to_string());
         let prompt = material_prompt(&fname);
 
+        let mut options = AnalyzeOptions::default().json();
+        if cli.profile {
+            options = options.with_profile_path(&profile_path);
+        }
         let record = match cli_ai_analyzer::analyze(
             &prompt,
             &[&img],
-            AnalyzeOptions::default().json(),
+            options,
         ) {
             Ok(raw) => match parse_material_json(&raw) {
                 Ok(mut rec) => {
