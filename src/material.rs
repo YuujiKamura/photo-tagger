@@ -127,6 +127,43 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub struct ActivityFrame {
+    pub activity: String,
+    pub ts: i64,
+}
+
+pub fn classify_activity(text: &str) -> Option<&'static str> {
+    if text.contains("交通保安施設") && text.contains("設置状況") {
+        return Some("交通保安施設_設置状況");
+    }
+    if text.contains("トラックスケール") && text.contains("計量状況") {
+        return Some("トラックスケール_計量状況");
+    }
+    if text.contains("積載量") && text.contains("確認") {
+        return Some("積載量_確認");
+    }
+    if text.contains("処分状況") && text.contains("社内検査") {
+        return Some("処分状況_社内検査");
+    }
+    if text.contains("出荷指示確認") {
+        return Some("出荷指示確認");
+    }
+    None
+}
+
+pub fn infer_activity_with_gap(
+    prev: Option<&ActivityFrame>,
+    curr: &ActivityFrame,
+    gap_min: i64,
+) -> String {
+    if let Some(prev) = prev {
+        if curr.ts - prev.ts < gap_min * 60 {
+            return prev.activity.clone();
+        }
+    }
+    "未分類".to_string()
+}
+
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')? + 1;
@@ -178,5 +215,28 @@ mod tests {
 
         assert!(dir.path().join("analysis.json").exists());
         assert!(dir.path().join("analysis.csv").exists());
+    }
+
+    #[test]
+    fn classify_activity_keywords() {
+        assert_eq!(
+            classify_activity("交通保安施設 設置状況"),
+            Some("交通保安施設_設置状況")
+        );
+        assert_eq!(classify_activity("積載量 確認"), Some("積載量_確認"));
+        assert_eq!(classify_activity("unknown text"), None);
+    }
+
+    #[test]
+    fn infer_activity_with_gap_inherits() {
+        let prev = ActivityFrame {
+            activity: "積載量_確認".to_string(),
+            ts: 1000,
+        };
+        let curr = ActivityFrame {
+            activity: String::new(),
+            ts: 1000 + 9 * 60,
+        };
+        assert_eq!(infer_activity_with_gap(Some(&prev), &curr, 10), "積載量_確認");
     }
 }
