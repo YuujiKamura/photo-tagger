@@ -21,6 +21,8 @@ pub struct MaterialRecord {
     pub scene_measure_labels: Vec<String>,
     #[serde(default)]
     pub scene_measure_matched_labels: Vec<String>,
+    #[serde(default)]
+    pub scene_measure_matched_object_labels: Vec<String>,
     pub board_text: String,
     pub board_lines: Vec<String>,
     pub board_fields: HashMap<String, String>,
@@ -40,6 +42,7 @@ struct MaterialRecordPartial {
     scene_measure_threshold: Option<f64>,
     scene_measure_labels: Option<Vec<String>>,
     scene_measure_matched_labels: Option<Vec<String>>,
+    scene_measure_matched_object_labels: Option<Vec<String>>,
     board_text: Option<String>,
     board_lines: Option<Vec<String>>,
     board_fields: Option<HashMap<String, String>>,
@@ -59,6 +62,7 @@ impl MaterialRecord {
             scene_measure_threshold: 0.0,
             scene_measure_labels: Vec::new(),
             scene_measure_matched_labels: Vec::new(),
+            scene_measure_matched_object_labels: Vec::new(),
             board_text: String::new(),
             board_lines: Vec::new(),
             board_fields: HashMap::new(),
@@ -97,6 +101,7 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
         scene_measure_threshold: partial.scene_measure_threshold.unwrap_or_default(),
         scene_measure_labels: partial.scene_measure_labels.unwrap_or_default(),
         scene_measure_matched_labels: partial.scene_measure_matched_labels.unwrap_or_default(),
+        scene_measure_matched_object_labels: partial.scene_measure_matched_object_labels.unwrap_or_default(),
         board_text: partial.board_text.unwrap_or_default(),
         board_lines: partial.board_lines.unwrap_or_default(),
         board_fields: partial.board_fields.unwrap_or_default(),
@@ -159,6 +164,7 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
             scene_measure_threshold: rec.scene_measure_threshold,
             scene_measure_labels: rec.scene_measure_labels.join("; "),
             scene_measure_matched_labels: rec.scene_measure_matched_labels.join("; "),
+            scene_measure_matched_object_labels: rec.scene_measure_matched_object_labels.join("; "),
             board_text: rec.board_text,
             board_lines: rec.board_lines.join(" / "),
             board_fields: serde_json::to_string(&rec.board_fields).unwrap_or_default(),
@@ -445,6 +451,12 @@ pub fn normalize_for_match_with_rules(s: &str, rules: &NormalizeRules) -> String
 pub enum MatchMode {
     Label,
     Object,
+    Both,
+}
+
+pub struct MatchResult {
+    pub labels: Vec<String>,
+    pub objects: Vec<String>,
 }
 
 pub fn match_measure_labels(
@@ -452,7 +464,7 @@ pub fn match_measure_labels(
     measure_labels: &[String],
     rules: &NormalizeRules,
     mode: MatchMode,
-) -> Vec<String> {
+) -> MatchResult {
     match mode {
         MatchMode::Label => {
             let mut out: Vec<String> = Vec::new();
@@ -473,7 +485,7 @@ pub fn match_measure_labels(
                     out.push(label.clone());
                 }
             }
-            out
+            MatchResult { labels: out, objects: Vec::new() }
         }
         MatchMode::Object => {
             let mut out: Vec<String> = Vec::new();
@@ -499,7 +511,12 @@ pub fn match_measure_labels(
             }
             out.sort();
             out.dedup();
-            out
+            MatchResult { labels: Vec::new(), objects: out }
+        }
+        MatchMode::Both => {
+            let labels = match_measure_labels(objects, measure_labels, rules, MatchMode::Label).labels;
+            let objects = match_measure_labels(objects, measure_labels, rules, MatchMode::Object).objects;
+            MatchResult { labels, objects }
         }
     }
 }
@@ -521,6 +538,7 @@ struct MaterialCsvRow {
     scene_measure_threshold: f64,
     scene_measure_labels: String,
     scene_measure_matched_labels: String,
+    scene_measure_matched_object_labels: String,
     board_text: String,
     board_lines: String,
     board_fields: String,
@@ -770,6 +788,7 @@ mod tests {
         assert!(csv.contains("scene_measure_threshold"));
         assert!(csv.contains("scene_measure_labels"));
         assert!(csv.contains("scene_measure_matched_labels"));
+        assert!(csv.contains("scene_measure_matched_object_labels"));
     }
 
     #[test]
@@ -781,7 +800,7 @@ mod tests {
         let labels = vec!["メジャー".to_string(), "レーザー距離計".to_string()];
         let rules = default_normalize_rules();
         let matched = match_measure_labels(&objects, &labels, &rules, MatchMode::Label);
-        assert_eq!(matched, vec!["メジャー".to_string()]);
+        assert_eq!(matched.labels, vec!["メジャー".to_string()]);
     }
 
     #[test]
@@ -793,6 +812,19 @@ mod tests {
         let labels = vec!["メジャー".to_string(), "レーザー距離計".to_string()];
         let rules = default_normalize_rules();
         let matched = match_measure_labels(&objects, &labels, &rules, MatchMode::Object);
-        assert_eq!(matched, vec!["ﾒｼﾞｬｰ-12".to_string()]);
+        assert_eq!(matched.objects, vec!["ﾒｼﾞｬｰ-12".to_string()]);
+    }
+
+    #[test]
+    fn measure_label_matching_reports_both() {
+        let objects = vec![
+            ObjectItem { label: "ﾒｼﾞｬｰ-12".to_string(), area_ratio: 0.10, ..Default::default() },
+            ObjectItem { label: "道路".to_string(), area_ratio: 0.50, ..Default::default() },
+        ];
+        let labels = vec!["メジャー".to_string(), "レーザー距離計".to_string()];
+        let rules = default_normalize_rules();
+        let matched = match_measure_labels(&objects, &labels, &rules, MatchMode::Both);
+        assert_eq!(matched.labels, vec!["メジャー".to_string()]);
+        assert_eq!(matched.objects, vec!["ﾒｼﾞｬｰ-12".to_string()]);
     }
 }

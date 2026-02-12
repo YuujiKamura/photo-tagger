@@ -24,6 +24,7 @@ pub use material::{
     NormalizeRules,
     MatchMode,
     match_measure_labels,
+    MatchResult,
 };
 
 use std::collections::HashMap;

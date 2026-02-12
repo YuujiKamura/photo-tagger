@@ -78,6 +78,7 @@ struct Cli {
 enum MeasureMatchMode {
     Label,
     Object,
+    Both,
 }
 
 fn fmt_duration(d: Duration) -> String {
@@ -464,6 +465,7 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
     let match_mode = match cli.scene_measure_matched_mode {
         MeasureMatchMode::Label => MatchMode::Label,
         MeasureMatchMode::Object => MatchMode::Object,
+        MeasureMatchMode::Both => MatchMode::Both,
     };
     let classify_start = Instant::now();
     let mut pending_chunks: Vec<Vec<PathBuf>> = pending
@@ -514,8 +516,9 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                                 rec.scene_board_threshold = board_threshold;
                                 rec.scene_measure_threshold = measure_threshold;
                                 rec.scene_measure_labels = measure_labels.clone();
-                                rec.scene_measure_matched_labels =
-                                    match_measure_labels(&rec.objects, &measure_labels, &rules, match_mode);
+                                let matched = match_measure_labels(&rec.objects, &measure_labels, &rules, match_mode);
+                                rec.scene_measure_matched_labels = matched.labels;
+                                rec.scene_measure_matched_object_labels = matched.objects;
                                 if !include_e_board && is_e_board_only(&rec.objects) {
                                     rec.scene_type = "overview".to_string();
                                 }
@@ -587,6 +590,18 @@ fn load_normalize_rules(path: Option<&std::path::Path>, defaults: NormalizeRules
     for line in data.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("strip=") {
+            for ch in rest.chars() {
+                rules.strip_chars.insert(ch);
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("keep=") {
+            for ch in rest.chars() {
+                rules.strip_chars.remove(&ch);
+            }
             continue;
         }
         for ch in line.chars() {
@@ -859,5 +874,14 @@ mod tests {
         std::fs::write(&path, "★\n# comment\n").unwrap();
         let rules = load_normalize_rules(Some(&path), default_normalize_rules()).unwrap();
         assert!(rules.strip_chars.contains(&'★'));
+    }
+
+    #[test]
+    fn load_normalize_rules_strip_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules.txt");
+        std::fs::write(&path, "strip=★\nkeep=★\n").unwrap();
+        let rules = load_normalize_rules(Some(&path), default_normalize_rules()).unwrap();
+        assert!(!rules.strip_chars.contains(&'★'));
     }
 }
