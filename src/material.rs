@@ -9,6 +9,7 @@ use std::path::Path;
 pub struct MaterialRecord {
     pub file: String,
     pub scene_type: String,
+    pub scene_type_inferred: String,
     pub objects: Vec<ObjectItem>,
     pub board_text: String,
     pub board_lines: Vec<String>,
@@ -23,6 +24,7 @@ pub struct MaterialRecord {
 struct MaterialRecordPartial {
     file: Option<String>,
     scene_type: Option<String>,
+    scene_type_inferred: Option<String>,
     objects: Option<Vec<ObjectValue>>,
     board_text: Option<String>,
     board_lines: Option<Vec<String>>,
@@ -37,6 +39,7 @@ impl MaterialRecord {
         Self {
             file: file.to_string(),
             scene_type: String::new(),
+            scene_type_inferred: String::new(),
             objects: Vec::new(),
             board_text: String::new(),
             board_lines: Vec::new(),
@@ -70,6 +73,7 @@ pub fn parse_material_json(raw: &str) -> Result<MaterialRecord> {
     Ok(MaterialRecord {
         file: partial.file.unwrap_or_default(),
         scene_type: partial.scene_type.unwrap_or_default(),
+        scene_type_inferred: partial.scene_type_inferred.unwrap_or_default(),
         objects: normalize_objects(partial.objects.unwrap_or_default()),
         board_text: partial.board_text.unwrap_or_default(),
         board_lines: partial.board_lines.unwrap_or_default(),
@@ -126,6 +130,7 @@ pub fn materialize_outputs(jsonl: &Path, out_dir: &Path) -> Result<()> {
         let row = MaterialCsvRow {
             file: rec.file,
             scene_type: rec.scene_type,
+            scene_type_inferred: rec.scene_type_inferred,
             objects: rec.objects.iter().map(|o| o.label.clone()).collect::<Vec<_>>().join("; "),
             objects_json: serde_json::to_string(&rec.objects).unwrap_or_default(),
             board_text: rec.board_text,
@@ -274,6 +279,64 @@ pub fn is_e_board_only(objects: &[ObjectItem]) -> bool {
     !has_physical
 }
 
+fn is_board_label(label: &str, include_e_board: bool) -> bool {
+    if label.contains("黒板")
+        || label.contains("ホワイトボード")
+        || label.contains("工事用黒板")
+        || label.contains("手書きボード")
+    {
+        if !include_e_board && (label.contains("電子小黒板") || label.contains("電子黒板")) {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+fn is_measure_label(label: &str) -> bool {
+    let keywords = [
+        "メジャー",
+        "巻尺",
+        "定規",
+        "スケール",
+        "ノギス",
+        "クラックスケール",
+        "厚さ",
+        "ゲージ",
+        "温度計",
+        "計測",
+        "測定",
+    ];
+    keywords.iter().any(|k| label.contains(k))
+}
+
+pub fn infer_scene_from_objects(objects: &[ObjectItem], include_e_board: bool) -> String {
+    let mut max_board = 0.0;
+    let mut max_measure = 0.0;
+
+    for obj in objects {
+        if is_board_label(&obj.label, include_e_board) {
+            if obj.area_ratio > max_board {
+                max_board = obj.area_ratio;
+            }
+        }
+        if is_measure_label(&obj.label) {
+            if obj.area_ratio > max_measure {
+                max_measure = obj.area_ratio;
+            }
+        }
+    }
+
+    // Heuristic thresholds: closeup if measurement object dominates; otherwise board+measure.
+    if max_measure >= 0.25 {
+        return "measure_closeup".to_string();
+    }
+    if max_board >= 0.15 || (max_board > 0.0 && max_measure > 0.0) {
+        return "board_with_measure".to_string();
+    }
+    "overview".to_string()
+}
+
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')? + 1;
@@ -284,6 +347,7 @@ fn extract_json_object(s: &str) -> Option<&str> {
 struct MaterialCsvRow {
     file: String,
     scene_type: String,
+    scene_type_inferred: String,
     objects: String,
     objects_json: String,
     board_text: String,
@@ -456,5 +520,37 @@ mod tests {
         assert_eq!(rec.objects.len(), 1);
         assert_eq!(rec.objects[0].label, "看板");
         assert_eq!(rec.objects[0].bbox.w, 0.3);
+    }
+
+    #[test]
+    fn infer_scene_board_with_measure() {
+        let objects = vec![
+            ObjectItem { label: "工事用黒板".to_string(), area_ratio: 0.18, ..Default::default() },
+            ObjectItem { label: "メジャー".to_string(), area_ratio: 0.05, ..Default::default() },
+        ];
+        let scene = infer_scene_from_objects(&objects, false);
+        assert_eq!(scene, "board_with_measure");
+    }
+
+    #[test]
+    fn infer_scene_measure_closeup() {
+        let objects = vec![
+            ObjectItem { label: "メジャー".to_string(), area_ratio: 0.32, ..Default::default() },
+            ObjectItem { label: "舗装面".to_string(), area_ratio: 0.40, ..Default::default() },
+        ];
+        let scene = infer_scene_from_objects(&objects, false);
+        assert_eq!(scene, "measure_closeup");
+    }
+
+    #[test]
+    fn infer_scene_overview_ignores_e_board_by_default() {
+        let objects = vec![
+            ObjectItem { label: "電子小黒板".to_string(), area_ratio: 0.22, ..Default::default() },
+            ObjectItem { label: "道路".to_string(), area_ratio: 0.50, ..Default::default() },
+        ];
+        let scene = infer_scene_from_objects(&objects, false);
+        assert_eq!(scene, "overview");
+        let scene_include = infer_scene_from_objects(&objects, true);
+        assert_eq!(scene_include, "board_with_measure");
     }
 }

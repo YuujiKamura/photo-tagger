@@ -19,6 +19,7 @@ use photo_tagger::{
     infer_activity_with_gap,
     extract_top_keywords,
     is_e_board_only,
+    infer_scene_from_objects,
     material_prompt,
     materialize_outputs,
     parse_material_json,
@@ -464,6 +465,8 @@ fn run_material_mode(cli: &Cli) -> Result<()> {
                                 if rec.file.is_empty() {
                                     rec.file = fname.clone();
                                 }
+                                rec.scene_type_inferred =
+                                    infer_scene_from_objects(&rec.objects, include_e_board);
                                 if !include_e_board && is_e_board_only(&rec.objects) {
                                     rec.scene_type = "overview".to_string();
                                 }

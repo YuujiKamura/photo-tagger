@@ -16,6 +16,7 @@ pub use material::{
     infer_activity_with_gap,
     extract_top_keywords,
     is_e_board_only,
+    infer_scene_from_objects,
 };
 
 use std::collections::HashMap;
