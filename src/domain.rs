@@ -38,9 +38,9 @@ fn is_false(v: &bool) -> bool {
 
 pub type GroupRecords = HashMap<String, GroupRecord>;
 
-pub fn group_prompt(filenames: &[&str]) -> String {
+pub fn group_prompt(filenames: &[&str], vocabulary: Option<&[String]>) -> String {
     let list = filenames.join(", ");
-    format!(
+    let mut prompt = format!(
         r#"工事写真を分類・グループ分けせよ。同一対象の写真をグループにまとめろ。Output ONLY JSON array: [{{"file":"filename","role":"?","machine_type":"?","machine_id":"?","has_board":false,"detected_text":"","description":""}}, ...]
 ファイル: {list}
 role: 写真の役割（例: "機械全景", "特定自主検査証票", "排ガス対策型・低騒音型機械証票", "ナンバープレート", "始業前点検", "点検状況", "安全活動", "作業状況" など）
@@ -49,7 +49,16 @@ machine_id: 型式番号や識別情報。銘板・証票・黒板から読み�
 has_board: 黒板が写っていればtrue
 detected_text: 黒板・銘板・証票に書かれたテキストをそのまま記録
 description: 写真の内容を1文で記述"#
-    )
+    );
+    if let Some(vocab) = vocabulary {
+        if !vocab.is_empty() {
+            prompt.push_str(&format!(
+                "\n工事現場で使われる用語リスト（該当するものがあればこの用語を使え。なければ自由に記述せよ）:\n{}",
+                vocab.join(", ")
+            ));
+        }
+    }
+    prompt
 }
 
 pub fn extract_json_array(s: &str) -> Option<&str> {
@@ -58,7 +67,7 @@ pub fn extract_json_array(s: &str) -> Option<&str> {
     Some(&s[start..end])
 }
 
-pub fn classify_group_batch(images: &[PathBuf]) -> Result<Vec<(String, GroupItem)>> {
+pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>) -> Result<Vec<(String, GroupItem)>> {
     let names: Vec<&str> = images
         .iter()
         .map(|p| {
@@ -68,7 +77,7 @@ pub fn classify_group_batch(images: &[PathBuf]) -> Result<Vec<(String, GroupItem
         })
         .collect();
 
-    let prompt = group_prompt(&names);
+    let prompt = group_prompt(&names, vocabulary);
     let options = AnalyzeOptions::default().json();
 
     let raw = analyze(&prompt, images, options).context("AI analyze failed")?;

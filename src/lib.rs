@@ -10,7 +10,7 @@ use anyhow::Result;
 
 /// フォルダ内の画像をグループ分けして photo-groups.json に保存
 /// 既存のグループはスキップ。戻り値は全レコード。
-pub fn run_grouping(folder: &Path, batch_size: usize) -> Result<GroupRecords> {
+pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[String]>) -> Result<GroupRecords> {
     let mut records = load_group_records(folder);
     let images = collect_images_flat(folder);
 
@@ -32,7 +32,7 @@ pub fn run_grouping(folder: &Path, batch_size: usize) -> Result<GroupRecords> {
     }
 
     for batch in pending.chunks(batch_size) {
-        let results = classify_group_batch(batch)?;
+        let results = classify_group_batch(batch, vocabulary)?;
         for (fname, item) in results {
             records.insert(fname, GroupRecord {
                 role: item.role,

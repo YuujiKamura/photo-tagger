@@ -140,7 +140,7 @@ fn main() -> Result<()> {
                         batch.len()
                     );
                     let start = Instant::now();
-                    let results = match classify_group_batch(&batch) {
+                    let results = match classify_group_batch(&batch, None) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("  Batch {batch_num} error: {e}");
