@@ -1,8 +1,19 @@
+pub mod api_key;
 pub mod domain;
 pub mod fs_ops;
+pub mod prompt;
+pub mod voucher;
 
-pub use domain::{GroupRecord, GroupRecords, classify_group_batch, group_prompt};
+pub use domain::{GroupCore, GroupRecord, GroupRecords, classify_group_batch};
+pub use api_key::ApiKeyGuard;
+pub use cli_ai_analyzer::UsageMode;
+pub use prompt::group_prompt;
 pub use fs_ops::{collect_images_flat, load_group_records, save_group_records};
+pub use voucher::{
+    AsgaraFields, AsphaltFields, GuardmanFields, VoucherExtraction, VoucherFields, VoucherType,
+    collect_voucher_inputs, convert_voucher_file, extract_voucher_from_path, is_json, is_xlsx,
+    write_voucher_csv, write_voucher_json, write_voucher_xlsx,
+};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,7 +33,7 @@ const GROUP_GAP_SECS: i64 = 5 * 60;
 
 /// フォルダ内の画像をグループ分けして photo-groups.json に保存
 /// 既存のグループはスキップ。戻り値は全レコード。
-pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[String]>) -> Result<GroupRecords> {
+pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[String]>, usage_mode: UsageMode) -> Result<GroupRecords> {
     let mut records = load_group_records(folder);
     let images = collect_images_flat(folder);
     let capture_times = collect_capture_times(&images);
@@ -47,16 +58,11 @@ pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[Strin
 
     if !pending.is_empty() {
         for batch in pending.chunks(batch_size) {
-            let results = classify_group_batch(batch, vocabulary)?;
+            let results = classify_group_batch(batch, vocabulary, usage_mode)?;
             for (fname, item) in results {
                 records.insert(fname, GroupRecord {
-                    role: item.role,
-                    machine_type: item.machine_type,
-                    machine_id: item.machine_id,
+                    core: item.core,
                     group: 0,
-                    has_board: item.has_board,
-                    detected_text: item.detected_text,
-                    description: item.description,
                     captured_at: None,
                 });
             }
@@ -72,7 +78,7 @@ pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[Strin
 fn assign_groups(records: &mut GroupRecords) {
     let mut by_id: HashMap<String, Vec<String>> = HashMap::new();
     for (fname, rec) in records.iter() {
-        by_id.entry(rec.machine_id.clone()).or_default().push(fname.clone());
+        by_id.entry(rec.core.machine_id.clone()).or_default().push(fname.clone());
     }
 
     let mut segment_heads: Vec<(i64, String, u32)> = Vec::new();
@@ -136,8 +142,8 @@ fn assign_groups(records: &mut GroupRecords) {
 }
 
 fn has_attachment_hint(rec: &GroupRecord) -> bool {
-    rec.machine_id.contains("取付")
-        || rec.detected_text.contains("取付")
+    rec.core.machine_id.contains("取付")
+        || rec.core.detected_text.contains("取付")
 }
 
 fn extract_no(text: &str) -> Option<String> {
@@ -158,10 +164,10 @@ fn extract_no(text: &str) -> Option<String> {
 }
 
 fn normalize_machine_id(rec: &mut GroupRecord) {
-    let merged = format!("{} {}", rec.detected_text, rec.description);
+    let merged = format!("{} {}", rec.core.detected_text, rec.core.description);
     if merged.contains("取付") {
-        if let Some(no) = extract_no(&merged).or_else(|| extract_no(&rec.machine_id)) {
-            rec.machine_id = format!("取付道路 {}", no);
+        if let Some(no) = extract_no(&merged).or_else(|| extract_no(&rec.core.machine_id)) {
+            rec.core.machine_id = format!("取付道路 {}", no);
         }
     }
 }
@@ -204,9 +210,9 @@ fn apply_capture_times(records: &mut GroupRecords, capture_times: &HashMap<Strin
 fn propagate_attachment_by_time(records: &mut GroupRecords) {
     let mut by_no: HashMap<String, Vec<String>> = HashMap::new();
     for (fname, rec) in records.iter() {
-        if let Some(no) = extract_no(&rec.machine_id)
-            .or_else(|| extract_no(&rec.detected_text))
-            .or_else(|| extract_no(&rec.description))
+        if let Some(no) = extract_no(&rec.core.machine_id)
+            .or_else(|| extract_no(&rec.core.detected_text))
+            .or_else(|| extract_no(&rec.core.description))
         {
             by_no.entry(no).or_default().push(fname.clone());
         }
@@ -257,7 +263,7 @@ fn apply_attach_to_chunk(records: &mut GroupRecords, chunk: &[String], no: &str)
     }
     for fname in chunk {
         if let Some(rec) = records.get_mut(fname) {
-            rec.machine_id = format!("取付道路 {}", no);
+            rec.core.machine_id = format!("取付道路 {}", no);
         }
     }
 }
