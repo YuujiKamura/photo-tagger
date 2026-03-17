@@ -1,2 +1,16 @@
 /target
 /.worktrees
+
+# Security
+.env
+.env.*
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+*.swp
