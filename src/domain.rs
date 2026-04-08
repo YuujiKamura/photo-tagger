@@ -58,7 +58,7 @@ pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>, u
     let prompt = crate::prompt::group_prompt(&names, vocabulary);
     let options = AnalyzeOptions::default().json().with_usage_mode(usage_mode);
 
-    let raw = analyze(&prompt, images, options).context("AI analyze failed")?;
+    let raw = analyze(&prompt, images, options).map_err(|e| anyhow::anyhow!("AI analyze failed: {}", e))?;
 
     let json_val = extract_json_array(&raw)
         .with_context(|| format!("No JSON array in: {raw}"))?;
