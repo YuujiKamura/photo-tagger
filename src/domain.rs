@@ -44,6 +44,7 @@ pub fn extract_json_array(s: &str) -> Option<serde_json::Value> {
 }
 
 pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>, usage_mode: UsageMode) -> Result<Vec<(String, GroupItem)>> {
+    eprintln!("[photo-tagger] classify:start images={}", images.len());
     let names: Vec<String> = images
         .iter()
         .enumerate()
@@ -54,17 +55,23 @@ pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>, u
         })
         .collect();
     let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    eprintln!("[photo-tagger] classify:built_names names={}", names.join(", "));
 
     let prompt = crate::prompt::group_prompt(&names, vocabulary);
+    eprintln!("[photo-tagger] classify:prompt_ready chars={}", prompt.len());
     let options = AnalyzeOptions::default().json().with_usage_mode(usage_mode);
+    eprintln!("[photo-tagger] classify:before_analyze");
 
     let raw = analyze(&prompt, images, options).map_err(|e| anyhow::anyhow!("AI analyze failed: {}", e))?;
+    eprintln!("[photo-tagger] classify:after_analyze chars={}", raw.len());
 
     let json_val = extract_json_array(&raw)
         .with_context(|| format!("No JSON array in: {raw}"))?;
+    eprintln!("[photo-tagger] classify:json_extracted");
 
     let items: Vec<GroupItem> =
         serde_json::from_value(json_val).context("Failed to parse group JSON")?;
+    eprintln!("[photo-tagger] classify:json_parsed count={}", items.len());
 
     Ok(items
         .into_iter()

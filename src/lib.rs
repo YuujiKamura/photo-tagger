@@ -34,12 +34,18 @@ const GROUP_GAP_SECS: i64 = 5 * 60;
 /// フォルダ内の画像をグループ分けして photo-groups.json に保存
 /// 既存のグループはスキップ。戻り値は全レコード。
 pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[String]>, usage_mode: UsageMode) -> Result<GroupRecords> {
+    eprintln!("[photo-tagger] run_grouping:start folder={} batch_size={}", folder.display(), batch_size);
     let mut records = load_group_records(folder);
+    eprintln!("[photo-tagger] step1:loaded_records count={}", records.len());
     let images = collect_images_flat(folder);
+    eprintln!("[photo-tagger] step2:collected_images count={}", images.len());
     let capture_times = collect_capture_times(&images);
+    eprintln!("[photo-tagger] step3:capture_times count={}", capture_times.len());
     let force_reclassify = force_reclassify_enabled();
+    eprintln!("[photo-tagger] step4:force_reclassify enabled={}", force_reclassify);
 
     if images.is_empty() {
+        eprintln!("[photo-tagger] stop:no_images");
         return Ok(records);
     }
 
@@ -55,10 +61,13 @@ pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[Strin
             .cloned()
             .collect()
     };
+    eprintln!("[photo-tagger] step5:pending_images count={}", pending.len());
 
     if !pending.is_empty() {
-        for batch in pending.chunks(batch_size) {
+        for (batch_idx, batch) in pending.chunks(batch_size).enumerate() {
+            eprintln!("[photo-tagger] step6:batch_start idx={} size={}", batch_idx, batch.len());
             let results = classify_group_batch(batch, vocabulary, usage_mode)?;
+            eprintln!("[photo-tagger] step7:batch_done idx={} classified={}", batch_idx, results.len());
             for (fname, item) in results {
                 records.insert(fname, GroupRecord {
                     core: item.core,
@@ -69,9 +78,13 @@ pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[Strin
         }
     }
 
+    eprintln!("[photo-tagger] step8:apply_capture_times");
     apply_capture_times(&mut records, &capture_times);
+    eprintln!("[photo-tagger] step9:assign_groups");
     assign_groups(&mut records);
+    eprintln!("[photo-tagger] step10:save_group_records count={}", records.len());
     save_group_records(folder, &records)?;
+    eprintln!("[photo-tagger] run_grouping:done count={}", records.len());
     Ok(records)
 }
 
