@@ -6,7 +6,7 @@ pub mod voucher;
 
 pub use domain::{GroupCore, GroupRecord, GroupRecords, classify_group_batch};
 pub use api_key::ApiKeyGuard;
-pub use cli_ai_analyzer::UsageMode;
+pub use photo_ai_common::carrier::{CarrierConfig, UsageMode};
 pub use prompt::group_prompt;
 pub use fs_ops::{collect_images_flat, load_group_records, save_group_records};
 pub use voucher::{
@@ -33,7 +33,7 @@ const GROUP_GAP_SECS: i64 = 5 * 60;
 
 /// フォルダ内の画像をグループ分けして photo-groups.json に保存
 /// 既存のグループはスキップ。戻り値は全レコード。
-pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[String]>, usage_mode: UsageMode) -> Result<GroupRecords> {
+pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[String]>, carrier: CarrierConfig) -> Result<GroupRecords> {
     eprintln!("[photo-tagger] run_grouping:start folder={} batch_size={}", folder.display(), batch_size);
     let mut records = load_group_records(folder);
     eprintln!("[photo-tagger] step1:loaded_records count={}", records.len());
@@ -66,7 +66,7 @@ pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[Strin
     if !pending.is_empty() {
         for (batch_idx, batch) in pending.chunks(batch_size).enumerate() {
             eprintln!("[photo-tagger] step6:batch_start idx={} size={}", batch_idx, batch.len());
-            let results = classify_group_batch(batch, vocabulary, usage_mode)?;
+            let results = classify_group_batch(batch, vocabulary, carrier)?;
             eprintln!("[photo-tagger] step7:batch_done idx={} classified={}", batch_idx, results.len());
             for (fname, item) in results {
                 records.insert(fname, GroupRecord {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use std::thread;
 
 use photo_tagger::{
-    ApiKeyGuard, GroupRecord, GroupRecords, UsageMode, VoucherType, classify_group_batch,
+    ApiKeyGuard, CarrierConfig, GroupRecord, GroupRecords, VoucherType, classify_group_batch,
     collect_voucher_inputs, convert_voucher_file, extract_voucher_from_path, is_json, is_xlsx,
     write_voucher_csv, write_voucher_json, write_voucher_xlsx,
 };
@@ -272,7 +272,11 @@ fn print_group_summary(records: &GroupRecords) {
 fn main() -> Result<()> {
     let total_start = Instant::now();
     let cli = Cli::parse();
-    let usage_mode = if cli.pay_per_use { UsageMode::PayPerUse } else { UsageMode::TimeBasedQuota };
+    let carrier = if cli.pay_per_use {
+        CarrierConfig { billing: photo_ai_common::carrier::BillingMode::PayPerUse, ..Default::default() }
+    } else {
+        CarrierConfig::default()
+    };
 
     // PayPerUseモード: APIキーを対話入力→暗号化保持（_guardのlifetimeでenv var管理）
     let _api_key_guard = if cli.pay_per_use {
@@ -367,7 +371,7 @@ fn main() -> Result<()> {
                         batch.len()
                     );
                     let start = Instant::now();
-                    let results = match classify_group_batch(&batch, None, usage_mode) {
+                    let results = match classify_group_batch(&batch, None, carrier) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("  Batch {batch_num} error: {e}");

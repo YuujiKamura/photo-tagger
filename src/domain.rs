@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use cli_ai_analyzer::{analyze, AnalyzeOptions, UsageMode};
+use photo_ai_common::agentapi;
+use photo_ai_common::carrier::CarrierConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,14 +37,24 @@ pub struct GroupRecord {
 pub type GroupRecords = HashMap<String, GroupRecord>;
 
 pub fn extract_json_array(s: &str) -> Option<serde_json::Value> {
-    let start = s.find('[')?;
-    let end = s.rfind(']')? + 1;
-    let candidate = &s[start..end];
-    let val: serde_json::Value = serde_json::from_str(candidate).ok()?;
-    if val.is_array() { Some(val) } else { None }
+    // Try each '[' position from the end, since the actual response
+    // is typically after the prompt echo / TUI output.
+    let bytes = s.as_bytes();
+    let last_bracket = s.rfind(']')?;
+    for i in (0..=last_bracket).rev() {
+        if bytes[i] == b'[' {
+            let candidate = &s[i..=last_bracket];
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(candidate) {
+                if val.is_array() {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
 }
 
-pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>, usage_mode: UsageMode) -> Result<Vec<(String, GroupItem)>> {
+pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>, carrier: CarrierConfig) -> Result<Vec<(String, GroupItem)>> {
     eprintln!("[photo-tagger] classify:start images={}", images.len());
     let names: Vec<String> = images
         .iter()
@@ -59,10 +70,9 @@ pub fn classify_group_batch(images: &[PathBuf], vocabulary: Option<&[String]>, u
 
     let prompt = crate::prompt::group_prompt(&names, vocabulary);
     eprintln!("[photo-tagger] classify:prompt_ready chars={}", prompt.len());
-    let options = AnalyzeOptions::default().json().with_usage_mode(usage_mode);
-    eprintln!("[photo-tagger] classify:before_analyze");
+    eprintln!("[photo-tagger] classify:before_analyze (AgentAPI)");
 
-    let raw = analyze(&prompt, images, options).map_err(|e| anyhow::anyhow!("AI analyze failed: {}", e))?;
+    let raw = agentapi::analyze(&prompt, images, carrier)?;
     eprintln!("[photo-tagger] classify:after_analyze chars={}", raw.len());
 
     let json_val = extract_json_array(&raw)

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
-use cli_ai_analyzer::{analyze, AnalyzeOptions};
+use photo_ai_common::agentapi;
+use photo_ai_common::carrier::CarrierConfig;
 use encoding_rs::SHIFT_JIS;
 use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook};
 use serde::{Deserialize, Serialize};
@@ -559,8 +560,7 @@ fn extract_voucher_from_image(
     source_page: Option<u32>,
 ) -> Result<VoucherExtraction> {
     let prompt = voucher_prompt(voucher_type, source_file);
-    let options = AnalyzeOptions::default().json();
-    let raw = analyze(&prompt, &[image_path.to_path_buf()], options).context("AI analyze failed")?;
+    let raw = agentapi::analyze(&prompt, &[image_path.to_path_buf()], CarrierConfig::default()).context("AI analyze failed")?;
     let json_str = extract_json_object(&raw)
         .with_context(|| format!("No JSON object found in AI response: {raw}"))?;
 
