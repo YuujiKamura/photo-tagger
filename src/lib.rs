@@ -75,6 +75,13 @@ pub fn run_grouping(folder: &Path, batch_size: usize, vocabulary: Option<&[Strin
                     captured_at: None,
                 });
             }
+
+            // インクリメンタル保存: バッチごとに保存することで、中断時の進捗喪失を防ぐ
+            let mut temp_records = records.clone();
+            apply_capture_times(&mut temp_records, &capture_times);
+            assign_groups(&mut temp_records);
+            save_group_records(folder, &temp_records)?;
+            eprintln!("[photo-tagger] step7.1:incremental_save_done count={}", temp_records.len());
         }
     }
 
