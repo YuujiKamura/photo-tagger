@@ -18,3 +18,5 @@ Thumbs.db
 *.JPG
 *.PNG
 *.exe
+
+.omc/state/
